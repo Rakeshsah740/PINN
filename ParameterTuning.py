@@ -15,6 +15,10 @@ import jax.numpy as jnp
 from flax import linen as nn
 import optax
 
+import jax
+print(jax.__version__)
+print(jax.devices())
+
 # ============================================================
 # 1. DATA LOADING & PREPARATION
 # ============================================================
@@ -68,11 +72,11 @@ class PhysicsInformedNN(nn.Module):
         nn_out = nn.relu(nn_out)
         nn_pred = nn.Dense(features=1)(nn_out)
         
-
         # --- Physics Branch (Trainable Basquin Parameters) ---
-        # Initialize log10(sigma_f') around a realistic value (e.g., log10(1000) ~ 3.0)
+        # Initialize log10(sigma_f') 
         log10_sigma_f = self.param('log10_sigma_f', lambda key: jnp.array([3.0]))
-        # Initialize b (fatigue exponent is usually negative, e.g., -0.1)
+
+        # Initialize b 
         b = self.param('b', lambda key: jnp.array([-0.1]))
 
         return nn_pred
@@ -109,7 +113,7 @@ def train_step(params, opt_state, x, sigma_a_raw, y, lambda_phys):
     return params, opt_state, loss
 
 
-lambda_values = [0.00001, 0.0001, 0.001, 0.01, 0.1, 1.0, 10.0, 50.0]
+lambda_values = [0.00001, 0.0001, 0.001, 0.01, 0.1, 1.0, 10.0, 50.0, 100.0, 500.0, 1000.0, 10000]
 r2_scores = []
 mae_scores = []
 
@@ -148,8 +152,8 @@ plt.figure(figsize=(10, 5))
 plt.plot(lambda_values, r2_scores, marker='o', color='dodgerblue', linewidth=2.5, markersize=8)
 
 plt.xscale('log') # Changes X-axis to logarithmic intervals (0.001, 0.01, 0.1...)
-plt.title('PINN Generalization Capacity ($R^2$) vs. Physics Loss Weight ($\lambda_{phys}$)', fontsize=13, fontweight='bold')
-plt.xlabel('Physics Weight () - Log Scale', fontsize=12)
+plt.title('PINN Generalization Capacity ($R^2$) vs. Physics Loss Weight ($\lambda$)', fontsize=13, fontweight='bold')
+plt.xlabel('Physics Weight ($\lambda$) - Log Scale', fontsize=12)
 plt.ylabel('Test Set $R^2$ Score', fontsize=12)
 
 plt.grid(True, which="both", linestyle=':', alpha=0.6)

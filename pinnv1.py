@@ -242,8 +242,7 @@ if __name__ == '__main__':
 
     model_endurance = EnduranceNeuralNetwork()
 
-    """ """
-    # Z=4
+    """ Z=4
     alloy = jnp.array([
             92.3155, 7.0300, 0.1200, 0.0031, 0.0432, 0.3480, # Elements (Al to Mg) ; Z = 4,
             0.0009, 0.0024, 0.0082, 0.0007, 0.0005, 0.1280, # Elements (Cr to Ti)
@@ -334,7 +333,7 @@ if __name__ == '__main__':
     ])
     
     # 
-    """ 
+    
 
     # Convert to a NumPy array for preprocessing
     alloy_data_np = np.array(alloy_data)

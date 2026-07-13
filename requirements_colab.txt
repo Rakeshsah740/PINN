@@ -1,0 +1,21 @@
+# Core numerical libraries
+numpy
+pandas
+scipy
+matplotlib
+
+# Machine Learning
+scikit-learn
+xgboost
+
+# Excel support
+openpyxl
+
+# JAX ecosystem
+flax
+optax
+orbax-checkpoint
+
+# Utilities
+graphviz
+setgraphviz

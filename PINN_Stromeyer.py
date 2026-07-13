@@ -34,26 +34,32 @@ X_train_np, X_test_np, y_train_np, y_test_np = train_test_split(
     X, y, test_size=0.2, random_state=42
 )
 
+pd.DataFrame(X_test_np).to_excel('excel/X_test_np.xlsx', index=False)
+
 # Crucial: Scale features so the neural network branches stabilize
 scaler = StandardScaler()
 X_train_scaled = scaler.fit_transform(X_train_np)
 X_test_scaled = scaler.transform(X_test_np)
+pd.DataFrame(X_test_scaled).to_excel('excel/X_test_scaled.xlsx', index=False)
 
 # Convert to JAX arrays
 X_train = jnp.array(X_train_scaled)
 X_test = jnp.array(X_test_scaled)
 y_train = jnp.array(y_train_np)
 y_test = jnp.array(y_test_np)
+pd.DataFrame(X_test_np).to_excel('excel/X_test.xlsx', index=False)
 
 # Keep track of where sigma_a 
 sigma_a_idx = 15
 sigma_a_train_raw = jnp.array(X_train_np[:, [sigma_a_idx]])
 sigma_a_test_raw = jnp.array(X_test_np[:, [sigma_a_idx]])
+pd.DataFrame(sigma_a_test_raw).to_excel('excel/sigma_a_test_raw.xlsx', index=False)
 
 # We also need the runout indicator for later analysis
 runout_idx = 16
 runout_train_raw = jnp.array(X_train_np[:, [runout_idx]])
 runout_test_raw  = jnp.array(X_test_np[:, [runout_idx]])
+pd.DataFrame(runout_test_raw ).to_excel('excel/runout_test_raw .xlsx', index=False)
 
 
 
@@ -104,6 +110,7 @@ def mse_loss(params, x, y):
     predictions = model.apply(params, x)
     return jnp.mean((predictions - y) ** 2)
 
+
 def physics_loss(params,x, sigma_endurance_pred, sigma_a_raw,runout_flag):
     nn_pred= model.apply(params, x)
     log10_sigma_f = params['params']['log10_sigma_f'][0]
@@ -118,6 +125,8 @@ def physics_loss(params,x, sigma_endurance_pred, sigma_a_raw,runout_flag):
 
     n_valid = jnp.maximum(jnp.sum(mask), 1.0)
     return jnp.sum(masked_sq_err) / n_valid
+
+
 
 def total_loss(params, x, sigma_a_raw, y, lambda_phys,sigma_endurance_pred, runout_flag):
     mse = mse_loss(params, x, y)
@@ -148,7 +157,7 @@ def train_step(params, opt_state, x, sigma_a_raw, y, lambda_phys,sigma_endurance
     return params, opt_state, loss
 
 
-lamb = 0.01
+lamb = 1e-5
 
 
    
@@ -174,6 +183,11 @@ test_loss_history = []
 
 sigma_endurance_train = compute_sigma_endurance(X_train_np, params_endurance, scaler_X_endurance)
 sigma_endurance_test = compute_sigma_endurance(X_test_np, params_endurance, scaler_X_endurance)
+
+
+# Save both 
+pd.DataFrame(sigma_endurance_train, columns=['Train_Endurance']).to_excel('excel/train_endurance.xlsx', index=False)
+pd.DataFrame(sigma_endurance_test, columns=['Test_Endurance']).to_excel('excel/test_endurance.xlsx', index=False)
 
 
     
@@ -245,6 +259,8 @@ plt.ylabel('Test $R^2$ Score', fontsize=12)
 plt.grid(True, which="both", linestyle=':', alpha=0.6)
 plt.legend()
 plt.tight_layout()
+
+
        
 plt.figure(figsize=(10, 5))
 plt.plot(epoch_history, nn_loss_history, label='NN Loss', color='green', linestyle='-.', linewidth=3)
@@ -429,6 +445,6 @@ plt.ylabel('Stress Amplitude (MPa)', fontsize=12)
 plt.title('Predicted Fatigue Life for Z = 8', fontsize=14, fontweight='bold')
 plt.grid(True, which="both", linestyle=':', alpha=0.6)
 plt.legend(fontsize=11)
-
+""" """
 
 plt.show()

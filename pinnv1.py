@@ -182,7 +182,7 @@ if __name__ == '__main__':
 
 
     # Scatter Plot
-    """     
+      
     plt.figure(figsize=(8, 6))
     plt.scatter(y_test_np, y_pred, alpha=0.7, color='teal', label='PINN Predictions')
     plt.plot([y.min(), y.max()], [y.min(), y.max()], 'r--', label='Perfect Fit')
@@ -224,7 +224,7 @@ if __name__ == '__main__':
     plt.xlabel('NN Loss (MSE)', fontsize=12)
     plt.ylabel('Physics Loss (MSE)', fontsize=12)
     plt.grid(True, linestyle=':', alpha=0.6)    
-    """ 
+  
 
 
 
@@ -288,7 +288,7 @@ if __name__ == '__main__':
     """
     # Z = 8
     alloy = jnp.array([
-            88.0132, 10.80, 0.1850, 0.0131, 0.06140, 0.3080, # Elements (Al to Mg) ; Z = 4,
+            88.0132, 10.80, 0.1850, 0.0131, 0.6140, 0.3080, # Elements (Al to Mg) ; Z = 4,
             0.0011, 0.0018, 0.0067, 0.0012, 0.0005, 0.0554, # Elements (Cr to Ti)
             1, 0, 0                                        # T5=0, T6=1, T7=0
 
@@ -307,7 +307,7 @@ if __name__ == '__main__':
     alloy_data = []
     for sigma in stress_range:
         row = [
-            88.0132, 10.80, 0.1850, 0.0131, 0.06140, 0.3080, # Elements (Al to Mg) ; Z = 4,
+            88.0132, 10.80, 0.1850, 0.0131, 0.6140, 0.3080, # Elements (Al to Mg) ; Z = 4,
             0.0011, 0.0018, 0.0067, 0.0012, 0.0005, 0.0554, # Elements (Cr to Ti)
             1, 0, 0,                                       # T5=0, T6=1, T7=0
             sigma                                           # The changing stress level

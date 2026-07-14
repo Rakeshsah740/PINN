@@ -1,6 +1,7 @@
 """
 Physics-Informed Neural Network for Stromeyer's Law where the graphs starts from the endurance prediction
 
+Formlation of Physics loss using comparision of Stromeyer's equation and nn predicition.
 """
 import pickle
 import pandas as pd
@@ -367,26 +368,24 @@ plt.legend(fontsize=11)
 
 # Z = 8
 alloy = jnp.array([
-        88.0132, 10.80, 0.1850, 0.0131, 0.06140, 0.3080, # Elements (Al to Mg) ; Z = 4,
+        88.0132, 10.80, 0.1850, 0.0131, 0.6140, 0.3080, # Elements (Al to Mg) ; Z = 4,
         0.0011, 0.0018, 0.0067, 0.0012, 0.0005, 0.0554, # Elements (Cr to Ti)
-        1, 0, 0                                        # T5=0, T6=1, T7=0
+        1, 0, 0 ,                                       # T5=1, T6=0, T7=0
+        0, 0                                             # Placeholders for sigma and runout flag
 
-    ])
+    ]).reshape(1, -1) 
     
-alloy_scaled = scaler_X_endurance.transform(alloy.reshape(1, -1))  # Reshape to 2D for scaler
-scaled_pred = model_endurance.apply(params_endurance, jnp.array(alloy_scaled))
-predicted_endurance = scaler_y_endurance.inverse_transform(np.array(scaled_pred))  # Convert back to original scale
-print(f"Predicted log10(N) for the alloy: {predicted_endurance[0][0]:.4f}")
-print(f"Predicted sigma_endurance for the alloy: {predicted_endurance[0][1]:.4f}")
-predicted_endurance[0][1] = 78
+predicted_endurance = compute_sigma_endurance(alloy, params_endurance, scaler_X_endurance)
+print(f"Predicted sigma_endurance for the alloy: {predicted_endurance[0, 0]:.4f}")
+
 
 # Define your target stress range
-stress_range = np.linspace(predicted_endurance[0][1], 130, 10)
+stress_range = np.linspace(predicted_endurance[0][0], 130, 10)
 
 alloy_data = []
 for sigma in stress_range:
     row = [
-        88.0132, 10.80, 0.1850, 0.0131, 0.06140, 0.3080, # Elements (Al to Mg) ; Z = 4,
+        88.0132, 10.80, 0.1850, 0.0131, 0.6140, 0.3080, # Elements (Al to Mg) ; Z = 4,
         0.0011, 0.0018, 0.0067, 0.0012, 0.0005, 0.0554, # Elements (Cr to Ti)
         1, 0, 0,                                       # T5=0, T6=1, T7=0
         sigma , 0                                          # The changing stress level
@@ -437,7 +436,7 @@ N_pred_physical = 10 ** np.array(log10_N_pred)
 # ============================================================
 plt.figure(figsize=(8, 6))
 plt.plot(N_pred_physical, stress_range, color='crimson', linewidth=2.5, label='PINN Predicted S-N Curve')
-plt.hlines(y=predicted_endurance[0][1], xmin=N_pred_physical.max(), xmax=3e7, color='blue', linestyle='--', label=f'Predicted Endurance Limit: {predicted_endurance[0][1]:.2f} MPa')
+plt.hlines(y=predicted_endurance[0][0], xmin=N_pred_physical.max(), xmax=3e7, color='blue', linestyle='--', label=f'Predicted Endurance Limit: {predicted_endurance[0][0]:.2f} MPa')
 plt.scatter(N_stress, sigma_a_stress, color='teal', s=60, alpha=0.7, label='Experimental Data Points')
 plt.xscale('log') # S-N curves are traditionally viewed on a log scale for cycles
 plt.xlabel('Cycles to Failure (N)', fontsize=12)

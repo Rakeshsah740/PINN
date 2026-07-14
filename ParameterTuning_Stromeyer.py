@@ -106,6 +106,22 @@ def mse_loss(params, x, y):
 
 def physics_loss(params,x, sigma_endurance_pred, sigma_a_raw,runout_flag):
     nn_pred= model.apply(params, x)
+    log10_sigma_f = params['params']['log10_sigma_f'][0]
+    b = params['params']['b'][0]    
+
+    delta_sigma = jnp.maximum(sigma_a_raw - sigma_endurance_pred, 1e-8)
+    stromeyer_pred = ((jnp.log10(delta_sigma) - log10_sigma_f) / b - jnp.log10(2.0))
+
+    mask = 1.0 - runout_flag
+    sq_err = (nn_pred - stromeyer_pred) ** 2
+    masked_sq_err = sq_err * mask
+
+    n_valid = jnp.maximum(jnp.sum(mask), 1.0)
+    return jnp.sum(masked_sq_err) / n_valid
+
+""" 
+def physics_loss(params,x, sigma_endurance_pred, sigma_a_raw,runout_flag):
+    nn_pred= model.apply(params, x)
      
     N_pred = 10.0 ** nn_pred
 
@@ -123,6 +139,8 @@ def physics_loss(params,x, sigma_endurance_pred, sigma_a_raw,runout_flag):
     residual_sq = mask * residual**2
 
     return jnp.sum(residual_sq) / jnp.maximum(jnp.sum(mask), 1.0)
+"""
+
 
 def total_loss(params, x, sigma_a_raw, y, lambda_phys,sigma_endurance_pred, runout_flag):
     mse = mse_loss(params, x, y)
@@ -340,7 +358,7 @@ N_stress = np.array([
 
 # Z = 8
 alloy = jnp.array([
-        88.0132, 10.80, 0.1850, 0.0131, 0.06140, 0.3080, # Elements (Al to Mg) ; Z = 4,
+        88.0132, 10.80, 0.1850, 0.0131, 0.6140, 0.3080, # Elements (Al to Mg) ; Z = 4,
         0.0011, 0.0018, 0.0067, 0.0012, 0.0005, 0.0554, # Elements (Cr to Ti)
         1, 0, 0                                        # T5=0, T6=1, T7=0
 
@@ -359,7 +377,7 @@ stress_range = np.linspace(predicted_endurance[0][1], 130, 10)
 alloy_data = []
 for sigma in stress_range:
     row = [
-        88.0132, 10.80, 0.1850, 0.0131, 0.06140, 0.3080, # Elements (Al to Mg) ; Z = 4,
+        88.0132, 10.80, 0.1850, 0.0131, 0.6140, 0.3080, # Elements (Al to Mg) ; Z = 4,
         0.0011, 0.0018, 0.0067, 0.0012, 0.0005, 0.0554, # Elements (Cr to Ti)
         1, 0, 0,                                       # T5=0, T6=1, T7=0
         sigma , 0                                          # The changing stress level

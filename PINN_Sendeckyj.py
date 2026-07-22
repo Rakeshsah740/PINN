@@ -1,7 +1,9 @@
 """
-Physics-Informed Neural Network for Stromeyer's Law where the graphs starts from the endurance prediction
+Physics-Informed Neural Network USING Sendeckyj model.
+Here the Neural network learns the KV parameters involved the model (asymptotic fatigue strength, horizontal shift parameter, 
+fatigue strength coefficient, fatigue exponent) and also predict the logN.
 
-Formlation of Physics loss using comparision of Stromeyer's equation and nn predicition.
+Formlation of Physics loss using residual.
 """
 import pickle
 import pandas as pd
@@ -33,59 +35,43 @@ class PhysicsInformedNN(nn.Module):
         nn_out = nn.relu(nn_out)
         nn_out = nn.Dense(features=20)(nn_out)
         nn_out = nn.relu(nn_out)
-        nn_pred = nn.Dense(features=1)(nn_out)
-        
+        nn_pred = nn.Dense(features=5)(nn_out)
 
-        log10_sigma_f = self.param('log10_sigma_f', lambda key: jnp.array([3.0]))
-        # Initialize b (fatigue exponent is usually negative, e.g., -0.1)
-        b = self.param('b', lambda key: jnp.array([-0.1]))
+        logN = nn_pred[:,0]
 
-        return nn_pred, log10_sigma_f, b
+        # Adding constrained to the output
+        sigma_infinity = nn.softplus(nn_pred[:,1])   # since it is always positive
+        N0 = nn.softplus(nn_pred[:,2])
+        K = nn.softplus(nn_pred[:,3])
+        m = nn.sigmoid(nn_pred[:,4])
+
+        return logN, sigma_infinity, N0, K, m
     
-class EnduranceNeuralNetwork(nn.Module):
-    @nn.compact
-    def __call__(self, x):
-        x = nn.Dense(features=64)(x)
-        x = nn.relu(x)
-        x = nn.Dense(features=64)(x)
-        x = nn.relu(x)
-        x = nn.Dense(features=32)(x)
-        x = nn.relu(x)
-        nn_out = nn.Dense(features=2)(x)
-        return nn_out
-      
 
-def compute_sigma_endurance(x, model_endurance, params_endurance, scaler_X_endurance,scaler_y_endurance):
-    x_endurance = jnp.delete(x, jnp.array([15]), axis=1)
-    x_endurance_scaled = scaler_X_endurance.transform(x_endurance)
-    x_endurance_pred = model_endurance.apply(params_endurance, jnp.array(x_endurance_scaled))
-    x_endurance_pred_unscaled = scaler_y_endurance.inverse_transform(np.array(x_endurance_pred))
-    return x_endurance_pred_unscaled[:, 1].reshape(-1, 1)
 
 def mse_loss(params, model, x, y):
-    predictions,_,_ = model.apply(params, x)
-    return jnp.mean((predictions.reshape(-1, 1) - y.reshape(-1, 1)) ** 2)
+    logN_pred, _, _, _, _ = model.apply(params, x)
+    return jnp.mean((logN_pred - y[:,0]) ** 2)
 
-def physics_loss(params, model, x, sigma_endurance_pred, sigma_a_raw):
-    nn_pred, log10_sigma_f, b= model.apply(params, x)
-     
+  
+def physics_loss(params, model, x, sigma_a_raw):
+    logN, sigma_infinity, N0, K, m = model.apply(params, x)
+    N = 10**logN
+    ratio = K/(N + N0)**m
+    phy_calc = sigma_infinity + ratio
+    residual = sigma_a_raw - phy_calc
+    return jnp.mean(residual**2)
 
-    delta_sigma = jnp.maximum(sigma_a_raw - sigma_endurance_pred, 1e-8)
-    stromeyer_pred = ((jnp.log10(delta_sigma) - log10_sigma_f) / b - jnp.log10(2.0))
+    
 
-    sq_err = (nn_pred - stromeyer_pred) ** 2
-   
-    return jnp.mean(sq_err)
-
-
-
-def total_loss(params, model, x, sigma_a_raw, y, lambda_phys,sigma_endurance_pred):
-    mse = mse_loss(params,model, x, y)
-    phys = physics_loss(params,model, x, sigma_endurance_pred, sigma_a_raw)
+def total_loss(params, model, x, sigma_a_raw, y, lambda_phys):
+    mse = mse_loss(params, model, x, y)
+    phys = physics_loss(params, model, x,sigma_a_raw)
     return   mse +  lambda_phys * phys
 
 
-def train_pinn_stromeyer(data_path, num_epochs=1200, lr=0.001, lamb=1e-5, random_state=42):
+def train_pinn_sendeckyj(data_path, num_epochs=650, lr=0.001, lamb=1e-4, random_state=42):
+
     # ============================================================
     # 1. DATA LOADING & PREPARATION
     # ============================================================
@@ -104,10 +90,12 @@ def train_pinn_stromeyer(data_path, num_epochs=1200, lr=0.001, lamb=1e-5, random
     )
 
 
+
     # Crucial: Scale features so the neural network branches stabilize
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train_np)
     X_test_scaled = scaler.transform(X_test_np)
+
 
     # Convert to JAX arrays
     X_train = jnp.array(X_train_scaled)
@@ -119,44 +107,21 @@ def train_pinn_stromeyer(data_path, num_epochs=1200, lr=0.001, lamb=1e-5, random
     # Keep track of where sigma_a 
     sigma_a_idx = 15
     sigma_a_train_raw = jnp.array(X_train_np[:, [sigma_a_idx]])
-    
+    sigma_a_test_raw = jnp.array(X_test_np[:, [sigma_a_idx]])
 
-
-  
-
-   
-    # Initialize model and parameters                                            
-    model = PhysicsInformedNN()
-    optimizer = optax.adam(learning_rate=lr)
-
-
-    print("Loading Endurance model assets...")
-    with open("endurance_pinn_model.pkl", 'rb') as f:
-        assets = pickle.load(f)
-
-    params_endurance = assets['model_params']
-    scaler_X_endurance = assets['scaler_X']
-    scaler_y_endurance = assets['scaler_y']
-
-    model_endurance = EnduranceNeuralNetwork()  
 
     @jax.jit
-    def train_step(params, opt_state, x, sigma_a_raw, y, lamb,sigma_endurance_pred):
+    def train_step(params, opt_state, x, sigma_a_raw, y):
         loss, grads = jax.value_and_grad(
-            lambda p: total_loss(p, model, x, sigma_a_raw, y, lamb, sigma_endurance_pred)
+            lambda p: total_loss(p, model, x, sigma_a_raw, y, lamb)
         )(params)
         updates, opt_state = optimizer.update(grads, opt_state)
         params = optax.apply_updates(params, updates)
         return params, opt_state, loss
 
-    
 
     r2_history = []
     mae_scores = []
-
-    training_history = []
-    b_history = []
-    log10_sigma_f_history = []
     nn_loss_history = []
     phys_loss_history = []
     total_loss_history = []
@@ -164,55 +129,49 @@ def train_pinn_stromeyer(data_path, num_epochs=1200, lr=0.001, lamb=1e-5, random
     train_loss_history = []
     test_loss_history = []
         
+    # Initialize model and parameters                                            
+    model = PhysicsInformedNN()
+    optimizer = optax.adam(learning_rate=0.001)
 
-    sigma_endurance_train = compute_sigma_endurance(X_train_np,model_endurance, params_endurance, scaler_X_endurance,scaler_y_endurance)
 
-
-
-        
-    # Initialize 
+    # Initialize parameters 
     key = jax.random.PRNGKey(42)
     params = model.init(key, X_train[0:1])
     opt_state = optimizer.init(params)
 
 
     pbar = tqdm(range(num_epochs), desc="Training Epochs")
+
     for epoch in pbar:
-        params, opt_state, train_loss = train_step(params, opt_state, X_train, sigma_a_train_raw, y_train, lamb, sigma_endurance_train)
-        #params, opt_state, train_loss = train_step(params, opt_state, X_train, sigma_a_train_raw, y_train)
-        
+        params, opt_state, train_loss = train_step(params, opt_state, X_train, sigma_a_train_raw, y_train)
         if epoch % 20 == 0 or epoch == 1:
             test_loss = mse_loss(params, model, X_test, y_test)
             train_loss_history.append(train_loss)
             test_loss_history.append(test_loss)
-            phys_loss_value = physics_loss(params,model, X_train, sigma_endurance_train, sigma_a_train_raw)
+            phys_loss_value = physics_loss(params,model, X_train, sigma_a_train_raw)
             nn_loss_value = mse_loss(params,model, X_train, y_train)
-            total_loss_value = total_loss(params,model, X_train, sigma_a_train_raw, y_train, lamb, sigma_endurance_train)
+            total_loss_value = total_loss(params,model, X_train, sigma_a_train_raw, y_train, lamb)
             nn_loss_history.append(nn_loss_value)
             phys_loss_history.append(phys_loss_value)
             total_loss_history.append(total_loss_value)
             epoch_history.append(epoch)
 
             # Evaluate on test set periodically
-            y_pred_test,_,_ = model.apply(params, X_test)
+            y_pred_test, _, _, _, _  = model.apply(params, X_test)
             y_pred_test = np.array(y_pred_test)
             current_r2 = r2_score(y_test_np, y_pred_test)
             current_mae = mean_absolute_error(y_test_np, y_pred_test)
             r2_history.append(current_r2)
             
 
-            log10_sigma_f_history.append(float(params['params']['log10_sigma_f'][0]))
-            b_history.append(float(params['params']['b'][0]))
             pbar.set_postfix({
                 "R^2": f"{r2_history[-1]:.6f}",
                 "NN_Loss": f"{nn_loss_history[-1]:.6f}",
                 "Physics_Loss": f"{phys_loss_history[-1]:.6f}",
                 "Total_Loss": f"{total_loss_history[-1]:.6f}"})
 
-
-
     # Evaluate performance on test set after training completes
-    y_pred ,_,_ = model.apply(params, X_test)
+    y_pred, _, _, _, _ = model.apply(params, X_test)
     y_pred = np.array(y_pred)
     final_r2 = r2_score(y_test_np, y_pred)
     final_mae = mean_absolute_error(y_test_np, y_pred)
@@ -223,7 +182,7 @@ def train_pinn_stromeyer(data_path, num_epochs=1200, lr=0.001, lamb=1e-5, random
     print(f"R² Score: {final_r2:.4f}")
     print(f"MAE: {final_mae:.4f}")
 
-        # Pack histories into a clean dictionary
+    # Pack histories into a clean dictionary
     history = {
         "epoch": epoch_history,
         "train_loss": train_loss_history,
@@ -240,14 +199,13 @@ def train_pinn_stromeyer(data_path, num_epochs=1200, lr=0.001, lamb=1e-5, random
     return params, model, scaler, metrics, history
 
 
-       
 if __name__ == "__main__":
     # Call your pipeline function with custom parameters
-    trained_params, model, scaler, metrics, history = train_pinn_stromeyer(
+    trained_params, model, scaler, metrics, history = train_pinn_sendeckyj(
         data_path="V4.xlsx",
-        num_epochs=1200,
+        num_epochs=650,
         lr=0.001,
-        lamb=1e-5
+        lamb=1e-4
     )
 
     # PLOT PERFORMANCE
@@ -286,31 +244,14 @@ if __name__ == "__main__":
 
 
 
+    
     # 5. PREDICTING FOR A SPECIFIC ALLOY (SYNTHETIC S-N CURVE)
     # ============================================================
-    with open("endurance_pinn_model.pkl", 'rb') as f:
-        assets = pickle.load(f)
 
-    params_endurance = assets['model_params']
-    scaler_X_endurance = assets['scaler_X']
-    scaler_y_endurance = assets['scaler_y']
-    model_endurance = EnduranceNeuralNetwork()
 
     # Z=4
-    alloy4 = jnp.array([[
-            92.3155, 7.0300, 0.1200, 0.0031, 0.0432, 0.3480, # Elements (Al to Mg) ; Z = 4,
-            0.0009, 0.0024, 0.0082, 0.0007, 0.0005, 0.1280, # Elements (Cr to Ti)
-            0, 1, 0                                        # T5=0, T6=1, T7=0
-            ,0
-        ]])
-        
-    
-    predicted_endurance4 = compute_sigma_endurance(alloy4,model_endurance, params_endurance, scaler_X_endurance,scaler_y_endurance)
-    print(f"Predicted sigma_endurance for the (z=4): {predicted_endurance4[0][0]:.4f}")
-        
 
-    # Define your target stress range (e.g., from 40 MPa to 250 MPa)
-    stress_range4 = np.linspace(predicted_endurance4[0][0], 250, 10)
+    stress_range4 = np.linspace(70, 250, 10)
 
     alloy_data4 = []
     for sigma in stress_range4:
@@ -318,7 +259,7 @@ if __name__ == "__main__":
             92.3155, 7.0300, 0.1200, 0.0031, 0.0432, 0.3480, # Elements (Al to Mg) ; Z = 4,
             0.0009, 0.0024, 0.0082, 0.0007, 0.0005, 0.1280, # Elements (Cr to Ti)
             0, 1, 0,                                        # T5=0, T6=1, T7=0
-            sigma                                            # The changing stress level
+            sigma                                        # The changing stress level
         ]
         alloy_data4.append(row)
 
@@ -342,12 +283,14 @@ if __name__ == "__main__":
     # 1. Scale the data using the exact same scaler from training
     alloy_data_scaled4 = scaler.transform(alloy_data_np4)
 
-
     # 3. Convert to JAX arrays
     X_alloy_jax4 = jnp.array(alloy_data_scaled4)
 
+
     # 4. Generate predictions (Outputs will be in log10(N))
-    log10_N_pred4,_,_ = model.apply(trained_params, X_alloy_jax4)
+    log10_N_pred4, _, _, _, _ = model.apply(trained_params, X_alloy_jax4)
+
+    
 
     # 5. Convert back to raw physical cycles: N = 10^(log10(N))
     N_pred_physical4 = 10 ** np.array(log10_N_pred4)
@@ -357,7 +300,7 @@ if __name__ == "__main__":
     # ============================================================
     plt.figure(figsize=(8, 6))
     plt.plot(N_pred_physical4, stress_range4, color='crimson', linewidth=2.5, label='PINN Predicted S-N Curve')
-    plt.hlines(y=predicted_endurance4[0][0], xmin=N_pred_physical4.max(), xmax=3e7, color='blue', linestyle='--', label=f'Predicted Endurance Limit: {predicted_endurance4[0][0]:.2f} MPa')
+    #plt.hlines(y=predicted_endurance4[0][1], xmin=N_pred_physical4.max(), xmax=3e7, color='blue', linestyle='--', label=f'Predicted Endurance Limit: {predicted_endurance4[0][1]:.2f} MPa')
     plt.scatter(N_stress4, sigma_a_stress4, color='teal', s=60, alpha=0.7, label='Experimental Data Points')
     plt.xscale('log') # S-N curves are traditionally viewed on a log scale for cycles
     plt.xlabel('Cycles to Failure (N)', fontsize=12)
@@ -369,21 +312,10 @@ if __name__ == "__main__":
 
 
     # Z = 8
-    alloy = jnp.array([[
-            88.0132, 10.80, 0.1850, 0.0131, 0.6140, 0.3080, # Elements (Al to Mg) ; Z = 4,
-            0.0011, 0.0018, 0.0067, 0.0012, 0.0005, 0.0554, # Elements (Cr to Ti)
-            1, 0, 0 ,                                       # T5=1, T6=0, T7=0
-            0                                            # Placeholders for sigma and runout flag
-
-        ]])
-        
-    predicted_endurance = compute_sigma_endurance(alloy,model_endurance, params_endurance, scaler_X_endurance,scaler_y_endurance)
-    
-    print(f"Predicted sigma_endurance for the alloy (z=8): {predicted_endurance[0][0]:.4f}")
 
 
     # Define your target stress range
-    stress_range = np.linspace(predicted_endurance[0][0], 130, 10)
+    stress_range = np.linspace(60, 130, 10)
 
     alloy_data = []
     for sigma in stress_range:
@@ -391,7 +323,7 @@ if __name__ == "__main__":
             88.0132, 10.80, 0.1850, 0.0131, 0.6140, 0.3080, # Elements (Al to Mg) ; Z = 4,
             0.0011, 0.0018, 0.0067, 0.0012, 0.0005, 0.0554, # Elements (Cr to Ti)
             1, 0, 0,                                       # T5=0, T6=1, T7=0
-            sigma                                          # The changing stress level
+            sigma                                      # The changing stress level
         ]
         alloy_data.append(row)
 
@@ -424,10 +356,13 @@ if __name__ == "__main__":
 
     # 3. Convert to JAX arrays
     X_alloy_jax = jnp.array(alloy_data_scaled)
-   
+
+
+
 
     # 4. Generate predictions (Outputs will be in log10(N))
-    log10_N_pred,_,_ = model.apply(trained_params, X_alloy_jax)
+    log10_N_pred, _, _, _, _ = model.apply(trained_params, X_alloy_jax)
+
 
     # 5. Convert back to raw physical cycles: N = 10^(log10(N))
     N_pred_physical = 10 ** np.array(log10_N_pred)
@@ -437,7 +372,7 @@ if __name__ == "__main__":
     # ============================================================
     plt.figure(figsize=(8, 6))
     plt.plot(N_pred_physical, stress_range, color='crimson', linewidth=2.5, label='PINN Predicted S-N Curve')
-    plt.hlines(y=predicted_endurance[0][0], xmin=N_pred_physical.max(), xmax=3e7, color='blue', linestyle='--', label=f'Predicted Endurance Limit: {predicted_endurance[0][0]:.2f} MPa')
+    #plt.hlines(y=predicted_endurance[0][1], xmin=N_pred_physical.max(), xmax=3e7, color='blue', linestyle='--', label=f'Predicted Endurance Limit: {predicted_endurance[0][1]:.2f} MPa')
     plt.scatter(N_stress, sigma_a_stress, color='teal', s=60, alpha=0.7, label='Experimental Data Points')
     plt.xscale('log') # S-N curves are traditionally viewed on a log scale for cycles
     plt.xlabel('Cycles to Failure (N)', fontsize=12)
@@ -445,5 +380,6 @@ if __name__ == "__main__":
     plt.title('Predicted Fatigue Life for Z = 8', fontsize=14, fontweight='bold')
     plt.grid(True, which="both", linestyle=':', alpha=0.6)
     plt.legend(fontsize=11)
+    
 
     plt.show()

@@ -1,7 +1,7 @@
 """
 Incorrect physics has implemented in the model, also the PINN was not implemented correctly.
 it is crucial to ensure that the physics-informed neural network (PINN) correctly incorporates this law.
-PINNV1 the next model is available to  corret the physics implementation in the PINN. The Basquin law is typically expressed as:
+PINNV1 the next model is available to  correct the physics implementation in the PINN. The Basquin law is typically expressed as:
 N = (sigma_a / sigma_f')^(1/b)
 """
 

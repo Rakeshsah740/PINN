@@ -22,7 +22,7 @@ import optax
 # ============================================================
 class PhysicsInformedNN(nn.Module):
     @nn.compact
-    def __call__(self, x, sigma_a_raw):
+    def __call__(self, x):
         # --- Data-Driven Branch (Standard Neural Network) ---
         nn_out = nn.Dense(features=20)(x)
         nn_out = nn.relu(nn_out)
@@ -60,51 +60,47 @@ class EnduranceNeuralNetwork(nn.Module):
 # ============================================================
 # 2. LOSS AND TRAINING STEP DEFINITIONS
 # ============================================================
-def mse_loss(params, x, sigma_a_raw, y):
-    predictions = model.apply(params, x, sigma_a_raw)
+def mse_loss(params,model, x, y):
+    predictions = model.apply(params, x)
     return jnp.mean((predictions - y) ** 2)
 
-def physics_loss(params,x, sigma_a_raw):
-    nn_pred = model.apply(params, x, sigma_a_raw)
+def physics_loss(params,model,x, sigma_a_raw):
+    nn_pred = model.apply(params, x)
     log10_sigma_f = params['params']['log10_sigma_f'][0]
     b = params['params']['b'][0]
     basquin_pred = (1.0 / (b + 1e-8)) * (jnp.log10(sigma_a_raw) - log10_sigma_f) - jnp.log10(2)
     return jnp.mean((nn_pred - basquin_pred) ** 2)
 
-def total_loss(params, x, sigma_a_raw, y):
-    mse = mse_loss(params, x, sigma_a_raw, y)
-    phys = physics_loss(params, x, sigma_a_raw)
-    return mse + 0.001* phys  
+def total_loss(params,model, x, sigma_a_raw, y, lamb):
+    mse = mse_loss(params,model, x, y)
+    phys = physics_loss(params, model,  x, sigma_a_raw)
+    return mse + lamb* phys  
 
 
 
 # ============================================================
 # 3. TRAINING LOOP
 # ============================================================
-if __name__ == '__main__':
+def train_pinn_basquin(data_path, num_epochs=1200, lr=0.001, lamb=1e-5, random_state=42):
     # ============================================================
     # 1. DATA LOADING & PREPARATION
     # ============================================================
-    df = pd.read_excel("V3.xlsx")
+    df = pd.read_excel(data_path)
 
     feature_columns = [
         'Al 26','Si 14', 'Fe 26', 'Cu 29', 'Mn 25', 'Mg 12', 'Cr 24', 'Ni 28', 'Zn 30',
-        'Pb 82', 'Sn 50', 'Ti 22', 'T5 ?', 'T6 ?', 'T7 ?', 'sigma_a', 'Is that Runouts?'
+        'Pb 82', 'Sn 50', 'Ti 22', 'T5 ?', 'T6 ?', 'T7 ?', 'sigma_a'
     ]
 
-    X_data = df[feature_columns].values.astype(float)
-    y_data = np.log10(df['N'].values.astype(float)).reshape(-1, 1)
+    X = df[feature_columns].values.astype(float)
+    y = np.log10(df['N'].values.astype(float)).reshape(-1, 1)
 
-    mask = X_data[:, -1] == 0
-
-    X = X_data[mask, :-1]  # Exclude the last column (Is that Runouts?) for features
-    y = y_data[mask]
 
     # Keep track of where sigma_a is (it's the last column index: 15)
     sigma_a_idx = 15
 
     X_train_np, X_test_np, y_train_np, y_test_np = train_test_split(
-        X, y, test_size=0.2, random_state=42
+        X, y, test_size=0.2, random_state=random_state
     )
 
     # Crucial: Scale features so the neural network branches stabilize
@@ -121,44 +117,51 @@ if __name__ == '__main__':
     # We also need unscaled raw sigma_a values for the Basquin physical equation
     # since the law expects real physical units, not scaled deviations.
     sigma_a_train_raw = jnp.array(X_train_np[:, [sigma_a_idx]])
-    sigma_a_test_raw = jnp.array(X_test_np[:, [sigma_a_idx]])
+    
 
 
     # Initialize model and parameters
     key = jax.random.PRNGKey(0)                                                 # Always exact same initialization of weights for reproducibility. This is crucial for debugging and consistent results.
     model = PhysicsInformedNN()
-    params = model.init(key, X_train[0:1], sigma_a_train_raw[0:1])              # Initialize parameters using a single sample to get the correct shapes. This is a common practice in JAX/Flax to ensure the model's parameters are properly initialized before training.
+    params = model.init(key, X_train[0:1])              # Initialize parameters using a single sample to get the correct shapes. This is a common practice in JAX/Flax to ensure the model's parameters are properly initialized before training.
 
-    optimizer = optax.adam(learning_rate=0.001)
+    optimizer = optax.adam(learning_rate=lr)
     opt_state = optimizer.init(params)
 
     @jax.jit
-    def train_step(params, opt_state, x, sigma_a_raw, y):
-        loss, grads = jax.value_and_grad(total_loss)(params, x, sigma_a_raw, y)   # Compute the loss and its gradients with respect to the parameters
+    def train_step(params, opt_state, x, sigma_a_raw, y, lamb):
+        loss, grads = jax.value_and_grad(lambda p: total_loss(p, model, x, sigma_a_raw, y, lamb))(params)   # Compute the loss and its gradients with respect to the parameters
         updates, opt_state = optimizer.update(grads, opt_state)                 # Get the parameter updates from the optimizer based on the computed gradients
         params = optax.apply_updates(params, updates)                           # Apply the updates to the parameters to get the new parameters for the next iteration
         return params, opt_state, loss
 
-    num_epochs = 1000
+
+    r2_history = []
     train_loss_history = []
     test_loss_history = []
     epoch_history = []
     nn_loss_history = []
     phys_loss_history = []
     total_loss_history = []
+    
 
     print("Starting training...")
     for epoch in range(1, num_epochs + 1):
-        params, opt_state, train_loss = train_step(params, opt_state, X_train, sigma_a_train_raw, y_train)
+        params, opt_state, train_loss = train_step(params, opt_state, X_train, sigma_a_train_raw, y_train, lamb)
         
         if epoch % 10 == 0 or epoch == 1:
-            test_loss = mse_loss(params, X_test, sigma_a_test_raw, y_test)
+            test_loss = mse_loss(params,model, X_test, y_test)
             train_loss_history.append(train_loss)
             test_loss_history.append(test_loss)
             epoch_history.append(epoch)
-            nn_loss_history.append(mse_loss(params, X_train, sigma_a_train_raw, y_train))
-            phys_loss_history.append(physics_loss(params, X_train, sigma_a_train_raw))
-            total_loss_history.append(total_loss(params, X_train, sigma_a_train_raw, y_train))
+            nn_loss_history.append(mse_loss(params,model, X_train,y_train))
+            phys_loss_history.append(physics_loss(params,model, X_train, sigma_a_train_raw))
+            total_loss_history.append(total_loss(params,model, X_train, sigma_a_train_raw, y_train,lamb))
+
+            y_pred_test = np.array(model.apply(params, X_test))
+            y_pred_test = np.array(y_pred_test)
+            current_r2 = r2_score(y_test_np, y_pred_test)
+            r2_history.append(current_r2)
 
 
             print(f"Epoch {epoch:3d} | Train Loss: {train_loss:.4f} | Test Loss: {test_loss:.4f} | NN Loss: {nn_loss_history[-1]:.4f} | Phys Loss: {phys_loss_history[-1]:.4f}")
@@ -172,59 +175,69 @@ if __name__ == '__main__':
     # 4. MEASURE PERFORMANCE & PLOT PREDICTIONS
     # ============================================================
     # Generate predictions on test set
-    y_pred = np.array(model.apply(params, X_test, sigma_a_test_raw))
+    y_pred = np.array(model.apply(params, X_test))
 
-    r2 = r2_score(y_test_np, y_pred)
-    mae = mean_absolute_error(y_test_np, y_pred)
+    final_r2 = r2_score(y_test_np, y_pred)
+    final_mae = mean_absolute_error(y_test_np, y_pred)
 
-    print(f"\nPINN Model R² Score: {r2:.4f}")
-    print(f"PINN Model MAE:      {mae:.4f}")
+    print(f"\nPINN Model R² Score: {final_r2:.4f}")
+    print(f"PINN Model MAE:      {final_mae:.4f}")
 
+            # Pack histories into a clean dictionary
+    history = {
+        "epoch": epoch_history,
+        "train_loss": train_loss_history,
+        "test_loss": test_loss_history,
+        "nn_loss": nn_loss_history,
+        "phys_loss": phys_loss_history,
+        "total_loss": total_loss_history,
+        "r2": r2_history
+    }
 
+    metrics = {"final_r2": final_r2, "final_mae": final_mae}
+
+    return params, model, scaler, metrics, history
+
+if __name__ == "__main__":
+    # Call your pipeline function with custom parameters
+    trained_params, model, scaler, metrics, history = train_pinn_basquin(
+        data_path="V4.xlsx",
+        num_epochs=1000,
+        lr=0.001,
+        lamb=1e-3
+    )
     # Scatter Plot
-      
-    plt.figure(figsize=(8, 6))
-    plt.scatter(y_test_np, y_pred, alpha=0.7, color='teal', label='PINN Predictions')
-    plt.plot([y.min(), y.max()], [y.min(), y.max()], 'r--', label='Perfect Fit')
-    plt.xlabel('True log10(N)') 
-    plt.ylabel('Predicted log10(N)')
-    plt.title(f'PINN (Basquin Law): True vs Predicted (R² = {r2:.3f})')
-    plt.grid(True, linestyle=':', alpha=0.6)
-    plt.legend()
+    plt.figure(figsize=(10, 5))
 
-
-    plt.figure(figsize=(10, 6))
-
-    # Use epoch_history directly for the X-axis mapping
-    plt.plot(epoch_history, train_loss_history, label='Train Loss', color='blue', linewidth=2)
-    plt.plot(epoch_history, test_loss_history, label='Test Loss', color='orange', linestyle='--', linewidth=2)
-    plt.yscale('log')  # Log scale for better visibility of loss trends
-
-    plt.title('PINN Loss Over Epochs', fontsize=14, fontweight='bold')      
+    # Plot R² Score profile
+    plt.plot(history['epoch'], history['r2'], marker='o', color='dodgerblue', linewidth=2.5, markersize=8)
+    plt.xscale('linear') 
+    plt.title(r'($R^2$) Over Epochs ($\lambda$)', fontsize=13, fontweight='bold')
     plt.xlabel('Epochs', fontsize=12)
-    plt.ylabel('Mean Squared Error (MSE) - log scale', fontsize=12)
-    plt.grid(True, linestyle=':', alpha=0.6)
-    plt.legend(fontsize=12)
+    plt.ylabel('Test $R^2$ Score', fontsize=12)
+    plt.grid(True, which="both", linestyle=':', alpha=0.6)
+    plt.legend()
+    plt.tight_layout()
 
-    plt.figure(figsize=(10, 6))
-    plt.plot(epoch_history, nn_loss_history, label='NN Loss', color='green', linestyle='-.', linewidth=3)
-    plt.plot(epoch_history, phys_loss_history, label='Physics Loss', color='red', linestyle=':', linewidth=2)
-    plt.plot(epoch_history, total_loss_history, label='Total Loss', color='purple', linestyle='-', linewidth=2)
+
+        
+    plt.figure(figsize=(10, 5))
+    plt.plot(history['epoch'], history['nn_loss'], label='NN Loss', color='green', linestyle='-.', linewidth=3)
+    plt.plot(history['epoch'], history['phys_loss'], label='Physics Loss', color='red', linestyle=':', linewidth=2)
+    plt.plot(history['epoch'], history['total_loss'], label='Total Loss', color='purple', linestyle='-', linewidth=2)
     plt.yscale('log')  # Log scale for better visibility of loss trends
     plt.title('PINN Loss Components Over Epochs', fontsize=14, fontweight='bold')
     plt.xlabel('Epochs', fontsize=12)
     plt.ylabel('Mean Squared Error (MSE) - log scale', fontsize=12)
     plt.grid(True, linestyle=':', alpha=0.6)
-    plt.legend(fontsize=12)
+    plt.legend()
 
-
-    plt.figure(figsize=(10, 6))
-    plt.plot(nn_loss_history,phys_loss_history, label='Physics Loss vs NN Loss',color='magenta', linestyle='-', linewidth=2)
-    plt.title('Data Loss vs Physics Loss During Training', fontsize=14, fontweight='bold')
-    plt.xlabel('NN Loss (MSE)', fontsize=12)
-    plt.ylabel('Physics Loss (MSE)', fontsize=12)
-    plt.grid(True, linestyle=':', alpha=0.6)    
-  
+    plt.figure(figsize=(10, 5))
+    plt.plot(history['epoch'], history['train_loss'], label='Train Loss', color='blue', linewidth=2)
+    plt.plot(history['epoch'], history['test_loss'], label='Test Loss', color='orange', linestyle='--', linewidth=2)
+    plt.yscale('log')  # Log scale for better visibility of loss trends
+    plt.title('Training loss vs Test loss', fontsize=14, fontweight='bold')
+    plt.legend()
 
 
 
@@ -341,15 +354,11 @@ if __name__ == '__main__':
     # 1. Scale the data using the exact same scaler from training
     alloy_data_scaled = scaler.transform(alloy_data_np)
 
-    # 2. Extract the unscaled raw stress values for the physics branch
-    sigma_a_alloy_raw = alloy_data_np[:, [sigma_a_idx]]
-
     # 3. Convert to JAX arrays
     X_alloy_jax = jnp.array(alloy_data_scaled)
-    sigma_a_alloy_jax = jnp.array(sigma_a_alloy_raw)
 
     # 4. Generate predictions (Outputs will be in log10(N))
-    log10_N_pred = model.apply(params, X_alloy_jax, sigma_a_alloy_jax)
+    log10_N_pred = model.apply(trained_params, X_alloy_jax)
 
     # 5. Convert back to raw physical cycles: N = 10^(log10(N))
     N_pred_physical = 10 ** np.array(log10_N_pred)
@@ -369,10 +378,6 @@ if __name__ == '__main__':
     plt.legend(fontsize=11)
     plt.show()
 
-    # Print out a few sample predictions
-    print("\n--- Sample Predictions ---")
-    for i in [0, len(stress_range)//2, -1]:
-        print(f"Stress: {stress_range[i]:.1f} MPa ──► Predicted Life: {N_pred_physical[i][0]:,.0f} cycles")
 
 
 

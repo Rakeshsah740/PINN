@@ -20,11 +20,11 @@ from tqdm import tqdm
 # ============================================================
 # 1. DATA LOADING & PREPARATION
 # ============================================================
-df = pd.read_excel("V3.xlsx")
+df = pd.read_excel("V4.xlsx")
 
 feature_columns = [
     'Al 26','Si 14', 'Fe 26', 'Cu 29', 'Mn 25', 'Mg 12', 'Cr 24', 'Ni 28', 'Zn 30',
-    'Pb 82', 'Sn 50', 'Ti 22', 'T5 ?', 'T6 ?', 'T7 ?', 'sigma_a', 'Is that Runouts?'
+    'Pb 82', 'Sn 50', 'Ti 22', 'T5 ?', 'T6 ?', 'T7 ?', 'sigma_a'
 ]
 
 X = df[feature_columns].values.astype(float)
@@ -50,12 +50,9 @@ sigma_a_idx = 15
 sigma_a_train_raw = jnp.array(X_train_np[:, [sigma_a_idx]])
 sigma_a_test_raw = jnp.array(X_test_np[:, [sigma_a_idx]])
 
-# We also need the runout indicator for later analysis
-runout_idx = 16
-runout_train_raw = jnp.array(X_train_np[:, [runout_idx]])
-runout_test_raw  = jnp.array(X_test_np[:, [runout_idx]])
 
-
+# Use later to normalize residual on physics loss
+y_std = float(np.std(y_train_np))
 
 class PhysicsInformedNN(nn.Module):
     @nn.compact
@@ -76,9 +73,9 @@ class PhysicsInformedNN(nn.Module):
 
         log10_sigma_f = self.param('log10_sigma_f', lambda key: jnp.array([3.0]))
         # Initialize b (fatigue exponent is usually negative, e.g., -0.1)
-        b = self.param('b', lambda key: jnp.array([-0.1]))
-
-        return nn_pred
+        raw_b = self.param('raw_b', lambda key: jnp.array([-0.1]))
+        b = -jax.nn.softplus(raw_b) - 0.02   # always negative, never near 0
+        return nn_pred, log10_sigma_f, b
     
 class EnduranceNeuralNetwork(nn.Module):
     @nn.compact
@@ -93,31 +90,28 @@ class EnduranceNeuralNetwork(nn.Module):
         return nn_out
       
 
-def compute_sigma_endurance(x, params_endurance, scaler_X_endurance):
-    x_endurance = jnp.delete(x, jnp.array([15, 16]), axis=1)
+def compute_sigma_endurance(x, model_endurance, params_endurance, scaler_X_endurance,scaler_y_endurance):
+    x_endurance = jnp.delete(x, jnp.array([15]), axis=1)
     x_endurance_scaled = scaler_X_endurance.transform(x_endurance)
     x_endurance_pred = model_endurance.apply(params_endurance, jnp.array(x_endurance_scaled))
     x_endurance_pred_unscaled = scaler_y_endurance.inverse_transform(np.array(x_endurance_pred))
     return x_endurance_pred_unscaled[:, 1].reshape(-1, 1)
 
-def mse_loss(params, x, y):
-    predictions = model.apply(params, x)
-    return jnp.mean((predictions - y) ** 2)
+def mse_loss(params, model, x, y):
+    predictions,_,_ = model.apply(params, x)
+    return jnp.mean((predictions.reshape(-1, 1) - y.reshape(-1, 1)) ** 2)
 
-def physics_loss(params,x, sigma_endurance_pred, sigma_a_raw,runout_flag):
-    nn_pred= model.apply(params, x)
-    log10_sigma_f = params['params']['log10_sigma_f'][0]
-    b = params['params']['b'][0]    
+def physics_loss(params, model, x, sigma_endurance_pred, sigma_a_raw,y_std):
+    nn_pred, log10_sigma_f, b= model.apply(params, x)
+     
 
     delta_sigma = jnp.maximum(sigma_a_raw - sigma_endurance_pred, 1e-8)
     stromeyer_pred = ((jnp.log10(delta_sigma) - log10_sigma_f) / b - jnp.log10(2.0))
 
-    mask = 1.0 - runout_flag
-    sq_err = (nn_pred - stromeyer_pred) ** 2
-    masked_sq_err = sq_err * mask
+    residual = (nn_pred - stromeyer_pred)/y_std
+   
+    return jnp.mean(residual**2)
 
-    n_valid = jnp.maximum(jnp.sum(mask), 1.0)
-    return jnp.sum(masked_sq_err) / n_valid
 
 """ 
 def physics_loss(params,x, sigma_endurance_pred, sigma_a_raw,runout_flag):
@@ -142,11 +136,10 @@ def physics_loss(params,x, sigma_endurance_pred, sigma_a_raw,runout_flag):
 """
 
 
-def total_loss(params, x, sigma_a_raw, y, lambda_phys,sigma_endurance_pred, runout_flag):
-    mse = mse_loss(params, x, y)
-    phys = physics_loss(params, x, sigma_endurance_pred, sigma_a_raw, runout_flag)
+def total_loss(params, model, x, sigma_a_raw, y, lambda_phys,sigma_endurance_pred,y_std):
+    mse = mse_loss(params,model, x, y)
+    phys = physics_loss(params,model, x, sigma_endurance_pred, sigma_a_raw,y_std)
     return   mse +  lambda_phys * phys
-
    
 # Initialize model and parameters                                            
 model = PhysicsInformedNN()
@@ -164,22 +157,24 @@ scaler_y_endurance = assets['scaler_y']
 model_endurance = EnduranceNeuralNetwork()  
 
 @jax.jit
-def train_step(params, opt_state, x, sigma_a_raw, y, lambda_phys,sigma_endurance_pred, runout_flag):
-    loss, grads = jax.value_and_grad(total_loss)(params, x, sigma_a_raw, y, lambda_phys, sigma_endurance_pred, runout_flag)
+def train_step(params, opt_state, x, sigma_a_raw, y, lamb,sigma_endurance_pred):
+    loss, grads = jax.value_and_grad(
+        lambda p: total_loss(p, model, x, sigma_a_raw, y, lamb, sigma_endurance_pred,y_std)
+    )(params)
     updates, opt_state = optimizer.update(grads, opt_state)
     params = optax.apply_updates(params, updates)
     return params, opt_state, loss
 
 
+
 #lambda_values = [0.001,0.01, 1.0,10]  
 #lambda_values = [ 0.1, 1]
 lambda_values = [
-    1e-7,
-    1e-5,
-    1e-4,
-    1e-3,
     1e-2,
-    1e-1
+    1e-1,
+    0.2,
+    0.3,
+    0.5
 ]
 
 pbar = tqdm(lambda_values, desc="Lambda Tuning Sweep")
@@ -193,8 +188,8 @@ training_history = []
 
 
 
-sigma_endurance_train = compute_sigma_endurance(X_train_np, params_endurance, scaler_X_endurance)
-sigma_endurance_test = compute_sigma_endurance(X_test_np, params_endurance, scaler_X_endurance)
+sigma_endurance_train = compute_sigma_endurance(X_train_np,model_endurance, params_endurance, scaler_X_endurance,scaler_y_endurance)
+sigma_endurance_test = compute_sigma_endurance(X_test_np, model_endurance, params_endurance, scaler_X_endurance,scaler_y_endurance)
 
 print("Starting Parameter Tuning Sweep...")
 for lamb in pbar:
@@ -214,27 +209,22 @@ for lamb in pbar:
     
     # Internal training loop for current lambda
     for epoch in range(1, num_epochs + 1):
-        params, opt_state, _ = train_step(params, opt_state, X_train, sigma_a_train_raw, y_train, lamb, sigma_endurance_train, runout_train_raw)
-        phys_loss_value = physics_loss(params, X_train, sigma_endurance_train, sigma_a_train_raw, runout_train_raw)
-        nn_loss_value = mse_loss(params, X_train, y_train)
-        total_loss_value = total_loss(params, X_train, sigma_a_train_raw, y_train, lamb, sigma_endurance_train, runout_train_raw)
+        params, opt_state, train_loss = train_step(params, opt_state, X_train, sigma_a_train_raw, y_train, lamb, sigma_endurance_train)
+        phys_loss_value = physics_loss(params,model, X_train, sigma_endurance_train, sigma_a_train_raw,y_std)
+        nn_loss_value = mse_loss(params,model, X_train, y_train)
+        total_loss_value = total_loss(params,model, X_train, sigma_a_train_raw, y_train, lamb, sigma_endurance_train,y_std)
         nn_loss_history.append(nn_loss_value)
         phys_loss_history.append(phys_loss_value)
         total_loss_history.append(total_loss_value)
 
         log10_sigma_f_history.append(float(params['params']['log10_sigma_f'][0]))
-        b_history.append(float(params['params']['b'][0]))
+        b_history.append(float(params['params']['raw_b'][0]))
     
     
     print("log10_sigma_f range:", min(log10_sigma_f_history), max(log10_sigma_f_history))
     print("=> sigma_f' range (real units):", 10**min(log10_sigma_f_history), "to", 10**max(log10_sigma_f_history))
 
-    l1 = total_loss(params, X_train, sigma_a_train_raw, y_train, 0.0, sigma_endurance_train, runout_train_raw)
-    l2 = total_loss(params, X_train, sigma_a_train_raw, y_train, 100.0, sigma_endurance_train, runout_train_raw)
-    print(l1, l2)
-        
 
-    
 
     """
     training_history.append({
@@ -254,11 +244,14 @@ for lamb in pbar:
 
 
     # Evaluate performance on test set after training completes
-    y_pred= model.apply(params, X_test)
-    y_pred = np.array(y_pred)
+    #y_pred_,_= model.apply(params, X_test)
+    #y_pred = np.array(y_pred)
 
-    current_r2 = r2_score(y_test_np, y_pred)
-    current_mae = mean_absolute_error(y_test_np, y_pred)
+    # Generate predictions (Outputs will be in log10(N))
+    log10_N_pred,_,_ = model.apply(params, X_test)
+
+    current_r2 = r2_score(y_test_np, log10_N_pred)
+    current_mae = mean_absolute_error(y_test_np, log10_N_pred)
 
     # Save the scores to our tracking lists
     r2_scores.append(current_r2)

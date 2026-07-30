@@ -46,27 +46,44 @@ class PhysicsInformedNN(nn.Module):
         d = nn.sigmoid(nn_pred[:,5])
 
         return logN, Sigma_endurance, A, B, C, d
-    
 
+class EnduranceNeuralNetwork(nn.Module):
+    @nn.compact
+    def __call__(self, x):
+        x = nn.Dense(features=64)(x)
+        x = nn.relu(x)
+        x = nn.Dense(features=64)(x)
+        x = nn.relu(x)
+        x = nn.Dense(features=32)(x)
+        x = nn.relu(x)
+        nn_out = nn.Dense(features=2)(x)
+        return nn_out
+    
+def compute_sigma_endurance(x, model_endurance, params_endurance, scaler_X_endurance,scaler_y_endurance):
+    x_endurance = jnp.delete(x, jnp.array([15]), axis=1)
+    x_endurance_scaled = scaler_X_endurance.transform(x_endurance)
+    x_endurance_pred = model_endurance.apply(params_endurance, jnp.array(x_endurance_scaled))
+    x_endurance_pred_unscaled = scaler_y_endurance.inverse_transform(np.array(x_endurance_pred))
+    return x_endurance_pred_unscaled[:, 1].reshape(-1, 1)
 
 def mse_loss(params, model, x, y):
     logN_pred, _, _, _, _, _  = model.apply(params, x)
     return jnp.mean((logN_pred - y[:,0]) ** 2)
 
   
-def physics_loss(params, model, x, sigma_a_raw):
+def physics_loss(params, model, x, sigma_a_raw,sigma_a_std ):
     logN,Sigma_endurance, A, B, C, d = model.apply(params, x)
     N = 10**logN
     ratio = (1 + B/N)/(1 + C/N)
     kv = Sigma_endurance + A * ratio**d
-    residual = sigma_a_raw - kv
+    residual = (sigma_a_raw - kv)/ sigma_a_std
     return jnp.mean(residual**2)
 
     
 
-def total_loss(params, model, x, sigma_a_raw, y, lambda_phys):
+def total_loss(params, model, x, sigma_a_raw, y, lambda_phys,sigma_a_std ):
     mse = mse_loss(params,model, x, y)
-    phys = physics_loss(params, model, x,sigma_a_raw)
+    phys = physics_loss(params, model, x,sigma_a_raw,sigma_a_std )
     return   mse +  lambda_phys * phys
 
    
@@ -110,11 +127,13 @@ def train_pinn_kv(data_path, num_epochs=650, lr=0.001, lamb=1e-4, random_state=4
     sigma_a_train_raw = jnp.array(X_train_np[:, [sigma_a_idx]])
     sigma_a_test_raw = jnp.array(X_test_np[:, [sigma_a_idx]])
 
+    # Use later for the normalization
+    sigma_a_std = float(np.std(X_train_np[:, sigma_a_idx]))
 
     @jax.jit
     def train_step(params, opt_state, x, sigma_a_raw, y):
         loss, grads = jax.value_and_grad(
-            lambda p: total_loss(p, model, x, sigma_a_raw, y, lamb)
+            lambda p: total_loss(p, model, x, sigma_a_raw, y, lamb, sigma_a_std)
         )(params)
         updates, opt_state = optimizer.update(grads, opt_state)
         params = optax.apply_updates(params, updates)
@@ -132,7 +151,7 @@ def train_pinn_kv(data_path, num_epochs=650, lr=0.001, lamb=1e-4, random_state=4
         
     # Initialize model and parameters                                            
     model = PhysicsInformedNN()
-    optimizer = optax.adam(learning_rate=0.001)
+    optimizer = optax.adam(learning_rate=lr)
 
 
     # Initialize parameters 
@@ -149,9 +168,9 @@ def train_pinn_kv(data_path, num_epochs=650, lr=0.001, lamb=1e-4, random_state=4
             test_loss = mse_loss(params, model, X_test, y_test)
             train_loss_history.append(train_loss)
             test_loss_history.append(test_loss)
-            phys_loss_value = physics_loss(params,model, X_train, sigma_a_train_raw)
+            phys_loss_value = physics_loss(params,model, X_train, sigma_a_train_raw,sigma_a_std )
             nn_loss_value = mse_loss(params,model, X_train, y_train)
-            total_loss_value = total_loss(params,model, X_train, sigma_a_train_raw, y_train, lamb)
+            total_loss_value = total_loss(params,model, X_train, sigma_a_train_raw, y_train, lamb,sigma_a_std )
             nn_loss_history.append(nn_loss_value)
             phys_loss_history.append(phys_loss_value)
             total_loss_history.append(total_loss_value)
@@ -203,10 +222,10 @@ def train_pinn_kv(data_path, num_epochs=650, lr=0.001, lamb=1e-4, random_state=4
 if __name__ == "__main__":
     # Call your pipeline function with custom parameters
     trained_params, model, scaler, metrics, history = train_pinn_kv(
-        data_path="V4.xlsx",
+        data_path="V4_including_synt.xlsx",
         num_epochs=650,
         lr=0.001,
-        lamb=1e-4
+        lamb=0.5
     )
 
     # PLOT PERFORMANCE
@@ -248,11 +267,29 @@ if __name__ == "__main__":
     
     # 5. PREDICTING FOR A SPECIFIC ALLOY (SYNTHETIC S-N CURVE)
     # ============================================================
+    print("Loading Endurance model assets...")
+    with open("endurance_pinn_model.pkl", 'rb') as f:
+        assets = pickle.load(f)
 
+    params_endurance = assets['model_params']
+    scaler_X_endurance = assets['scaler_X']
+    scaler_y_endurance = assets['scaler_y']
+
+    model_endurance = EnduranceNeuralNetwork()  
 
     # Z=4
+    alloy4 = jnp.array([[
+            92.3155, 7.0300, 0.1200, 0.0031, 0.0432, 0.3480, # Elements (Al to Mg) ; Z = 4,
+            0.0009, 0.0024, 0.0082, 0.0007, 0.0005, 0.1280, # Elements (Cr to Ti)
+            0, 1, 0                                        # T5=0, T6=1, T7=0
+            ,0
+        ]])
+        
+    
+    predicted_endurance4 = compute_sigma_endurance(alloy4,model_endurance, params_endurance, scaler_X_endurance,scaler_y_endurance)
+    print(f"Predicted sigma_endurance for the (z=4): {predicted_endurance4[0][0]:.4f}")
 
-    stress_range4 = np.linspace(70, 250, 10)
+    stress_range4 = np.linspace(predicted_endurance4[0][0], 310, 10)
 
     alloy_data4 = []
     for sigma in stress_range4:
@@ -267,13 +304,17 @@ if __name__ == "__main__":
 
     # Actual test points for the alloy (for comparison)
     # Data
-    sigma_a_stress4 = np.array([238.9, 144.7, 191, 
-                        168.7, 156.1, 133.8, 98.4, 91.3, 114.7, 106.2, 
-                        84.2, 72.2, 72.2, 78.2, 78.2, 123.9, 78.2, 78.2])
+    # Data
+    sigma_a_stress4 = np.array([311.3, 297.0, 296.3, 291.5, 273.7, 283.1, 
+        300.3, 285.8, 264.7, 215.8,
+        238.9, 144.7, 191, 
+        168.7, 156.1, 133.8, 98.4, 91.3, 114.7, 106.2, 
+        84.2, 72.2, 72.2, 78.2, 78.2, 123.9, 78.2, 78.2])
 
 
     N_stress4 = np.array([
-        14009, 14823, 27433, 66863, 91377, 230870, 
+        18, 83, 174, 339, 412, 421, 474, 1279, 4546, 
+        21202,14009, 14823, 27433, 66863, 91377, 230870, 
         355297, 372672, 422572, 427476, 719897, 2027306, 3126784, 1975940, 1818832, 3152047, 
         10000000, 10000000
     ])
@@ -301,7 +342,7 @@ if __name__ == "__main__":
     # ============================================================
     plt.figure(figsize=(8, 6))
     plt.plot(N_pred_physical4, stress_range4, color='crimson', linewidth=2.5, label='PINN Predicted S-N Curve')
-    #plt.hlines(y=predicted_endurance4[0][1], xmin=N_pred_physical4.max(), xmax=3e7, color='blue', linestyle='--', label=f'Predicted Endurance Limit: {predicted_endurance4[0][1]:.2f} MPa')
+    plt.hlines(y=predicted_endurance4[0][0], xmin=N_pred_physical4.max(), xmax=3e7, color='blue', linestyle='--', label=f'Predicted Endurance Limit: {predicted_endurance4[0][0]:.2f} MPa')
     plt.scatter(N_stress4, sigma_a_stress4, color='teal', s=60, alpha=0.7, label='Experimental Data Points')
     plt.xscale('log') # S-N curves are traditionally viewed on a log scale for cycles
     plt.xlabel('Cycles to Failure (N)', fontsize=12)
@@ -313,10 +354,23 @@ if __name__ == "__main__":
 
 
     # Z = 8
+    alloy = jnp.array([[
+            88.0132, 10.80, 0.1850, 0.0131, 0.6140, 0.3080, # Elements (Al to Mg) ; Z = 4,
+            0.0011, 0.0018, 0.0067, 0.0012, 0.0005, 0.0554, # Elements (Cr to Ti)
+            1, 0, 0 ,                                       # T5=1, T6=0, T7=0
+            0                                            # Placeholders for sigma and runout flag
+
+        ]])
+        
+    predicted_endurance = compute_sigma_endurance(alloy,model_endurance, params_endurance, scaler_X_endurance,scaler_y_endurance)
+    
+    print(f"Predicted sigma_endurance for the alloy (z=8): {predicted_endurance[0][0]:.4f}")
 
 
     # Define your target stress range
-    stress_range = np.linspace(60, 130, 10)
+    stress_range = np.linspace(predicted_endurance[0][0], 285, 10)
+
+    
 
     alloy_data = []
     for sigma in stress_range:
@@ -332,6 +386,9 @@ if __name__ == "__main__":
     # Actual test points for the alloy (for comparison)
     # Data
     sigma_a_stress = np.array([
+        209.6, 184.3, 135.9, 135.4, 111.2,
+        250.9, 179.5, 210.3, 221.5, 87.1,
+        89.6, 234.1, 114.3,
         100.0, 100.0, 70.0, 100.0, 80.0,
         90.0, 90.0, 120.0, 90.0, 120.0,
         120.0, 80.0, 70.0, 80.0,
@@ -340,11 +397,15 @@ if __name__ == "__main__":
 
 
     N_stress = np.array([
+        65, 162, 11212, 24259, 115780,
+        114, 2405, 3949, 712, 168729,
+        675778, 11, 210658,
         121476, 50161, 2710250, 471938, 10000000,
         10000000, 130237, 61654, 171024, 706714,
         22026, 729292, 10000000, 10000000, 
         116454, 262829
     ])
+        
         
         
 
@@ -374,7 +435,7 @@ if __name__ == "__main__":
     # ============================================================
     plt.figure(figsize=(8, 6))
     plt.plot(N_pred_physical, stress_range, color='crimson', linewidth=2.5, label='PINN Predicted S-N Curve')
-    #plt.hlines(y=predicted_endurance[0][1], xmin=N_pred_physical.max(), xmax=3e7, color='blue', linestyle='--', label=f'Predicted Endurance Limit: {predicted_endurance[0][1]:.2f} MPa')
+    plt.hlines(y=predicted_endurance[0][0], xmin=N_pred_physical.max(), xmax=3e7, color='blue', linestyle='--', label=f'Predicted Endurance Limit: {predicted_endurance[0][0]:.2f} MPa')
     plt.scatter(N_stress, sigma_a_stress, color='teal', s=60, alpha=0.7, label='Experimental Data Points')
     plt.xscale('log') # S-N curves are traditionally viewed on a log scale for cycles
     plt.xlabel('Cycles to Failure (N)', fontsize=12)

@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import jax
 import jax.numpy as jnp
 import pickle
+import torch
 
 from pinnv1 import train_pinn_basquin
 from PINN_Stromeyer import train_pinn_stromeyer, compute_sigma_endurance
@@ -42,6 +43,8 @@ def compute_sigma_endurance(x, model_endurance, params_endurance, scaler_X_endur
     return x_endurance_pred_unscaled[:, 1].reshape(-1, 1)
 
 if __name__ == "__main__":
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
 
     print("Basquin Model")
     trained_params_bq, model_bq, scaler_bq, metrics_bq, history_bq = train_pinn_basquin(
@@ -80,7 +83,56 @@ if __name__ == "__main__":
 
 # 1. Define your alloy configurations in a list of dictionaries
 alloys_data = [
-    # --- ALLOY 1 (Z = 4) ---
+        # --- ALLOY 1 (Z = 1) ---
+    {
+        "z_id": 1,
+        "features": [
+            92.1128, 7.300, 0.1040, 0.0082, 0.0166, 0.3300, # Elements (Al to Mg) ; Z = 1,
+            0.0016, 0.0025, 0.0053, 0.0005, 0.0005, 0.1180, # Elements (Cr to Ti)
+            0, 1, 0                                          # T5=0, T6=1, T7=0
+    
+        ],
+        "endurance_base": [
+            92.1128, 7.300, 0.1040, 0.0082, 0.0166, 0.3300, # Elements (Al to Mg) ; Z = 1,
+            0.0016, 0.0025, 0.0053, 0.0005, 0.0005, 0.1180, # Elements (Cr to Ti)
+            0, 1, 0                                        # T5=0, T6=1, T7=0
+            ,0
+        ],
+        "max_stress": 290,  # Custom upper limit for stress range
+        "Rm": 283,
+        "Rp0.1": 205,
+        "k": 5.5,
+        "N_endurance": 2e6,
+        "endurance": 65,
+        "sigma_a_stress": np.array([
+                98.9,
+                115.3,  91.8, 72.9,
+                72.9, 85.0, 67.6, 67.6, 72.9,
+                62.6, 78.6, 67.6, 67.6, 58.0,
+                62.6
+        ]),
+        "N_stress": np.array([
+                216183,
+                384791,  896141, 1139222,
+                1528914, 1925880, 2744484, 3509964, 3903503,
+                4415340, 8384682, 10000084, 10000089, 10000103,
+                10000106
+        ]),
+            "sigma_a_lcf" : np.array([
+                274.3, 275.9, 261.8,
+                279.6, 214.5, 237.1, 270.6, 258.4,
+                259.4, 226.6, 221.1, 192.0, 206.4
+        ]),
+
+        "N_lcf" : np.array([
+                15, 35, 179, 
+                258, 278, 284, 519, 788, 
+                1370, 1487, 6257, 8658, 15610
+        ])
+    },
+
+
+    # --- ALLOY 2 (Z = 4) ---
     {
         "z_id": 4,
         "features": [
@@ -118,8 +170,47 @@ alloys_data = [
             21202
         ])
     },
+
+    # --- ALLOY 3 (Z = 6) ---
+        {
+            "z_id": 6,
+            "features": [
+                87.9112, 10.8900, 0.1820, 0.0188, 0.6180, 0.3100,
+                0.0016, 0.0024, 0.0098, 0.0010, 0.0005, 0.0547,
+                0, 0, 1
+            ],
+            "endurance_base": [
+                87.9112, 10.8900, 0.1820, 0.0188, 0.6180, 0.3100,
+                0.0016, 0.0024, 0.0098, 0.0010, 0.0005, 0.0547,
+                0, 0, 1,100
+            ],
+            "max_stress": 190,  # Custom upper limit for stress range
+            "Rm": 182,
+            "Rp0.1": 101,
+            "k": 12.4,
+            "N_endurance": 1e6,
+            "endurance": 74,
+            "sigma_a_stress": np.array([
+                90.0, 70.0, 90.0, 90.0, 80.0, 80.0, 75.0, 70.0, 90.0, 85.0,
+                75.0, 90.0, 70.0, 85.0, 85.0, 85.0, 75.0, 90.0, 80.0
+            ]),
+            "N_stress": np.array([
+                41467, 10000000, 118785, 65953, 379510, 528162, 123278, 10000000, 
+                77271, 40492, 4331637, 43224, 10000000, 143503, 252227, 69910, 
+                10000000, 189875, 1310118
+            ]),
+                "sigma_a_lcf" : np.array([
+                157.9, 139.1, 129.5, 108.7, 175.1, 130.0, 87.2, 97.0,
+                173.5, 155.1, 132.3, 93.2, 185.4, 76.1
+            ]),
     
-    # --- ALLOY 8 ---
+            "N_lcf" : np.array([
+                215, 746, 3099, 28209, 82, 1596, 3184417, 94365,
+                57, 215, 746, 122050, 11, 10000000
+            ])
+        },
+    
+    # --- ALLOY 4 ---
     {
         "z_id": 8,
         "features": [

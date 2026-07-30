@@ -15,6 +15,7 @@ import jax
 import jax.numpy as jnp
 from flax import linen as nn
 import optax
+from sympy import residue
 
 
 # ============================================================
@@ -64,16 +65,17 @@ def mse_loss(params,model, x, y):
     predictions = model.apply(params, x)
     return jnp.mean((predictions - y) ** 2)
 
-def physics_loss(params,model,x, sigma_a_raw):
+def physics_loss(params,model,x, sigma_a_raw,y_std):
     nn_pred = model.apply(params, x)
     log10_sigma_f = params['params']['log10_sigma_f'][0]
     b = params['params']['b'][0]
     basquin_pred = (1.0 / (b + 1e-8)) * (jnp.log10(sigma_a_raw) - log10_sigma_f) - jnp.log10(2)
-    return jnp.mean((nn_pred - basquin_pred) ** 2)
+    residual =(nn_pred - basquin_pred)/y_std
+    return jnp.mean((residual ** 2))
 
-def total_loss(params,model, x, sigma_a_raw, y, lamb):
+def total_loss(params,model, x, sigma_a_raw, y, lamb,y_std):
     mse = mse_loss(params,model, x, y)
-    phys = physics_loss(params, model,  x, sigma_a_raw)
+    phys = physics_loss(params, model,  x, sigma_a_raw,y_std)
     return mse + lamb* phys  
 
 
@@ -117,7 +119,10 @@ def train_pinn_basquin(data_path, num_epochs=1200, lr=0.001, lamb=1e-5, random_s
     # We also need unscaled raw sigma_a values for the Basquin physical equation
     # since the law expects real physical units, not scaled deviations.
     sigma_a_train_raw = jnp.array(X_train_np[:, [sigma_a_idx]])
-    
+
+
+    # Use later to normalize residual on physics loss
+    y_std = float(np.std(y_train_np))
 
 
     # Initialize model and parameters
@@ -130,7 +135,7 @@ def train_pinn_basquin(data_path, num_epochs=1200, lr=0.001, lamb=1e-5, random_s
 
     @jax.jit
     def train_step(params, opt_state, x, sigma_a_raw, y, lamb):
-        loss, grads = jax.value_and_grad(lambda p: total_loss(p, model, x, sigma_a_raw, y, lamb))(params)   # Compute the loss and its gradients with respect to the parameters
+        loss, grads = jax.value_and_grad(lambda p: total_loss(p, model, x, sigma_a_raw, y, lamb,y_std))(params)   # Compute the loss and its gradients with respect to the parameters
         updates, opt_state = optimizer.update(grads, opt_state)                 # Get the parameter updates from the optimizer based on the computed gradients
         params = optax.apply_updates(params, updates)                           # Apply the updates to the parameters to get the new parameters for the next iteration
         return params, opt_state, loss
@@ -143,6 +148,7 @@ def train_pinn_basquin(data_path, num_epochs=1200, lr=0.001, lamb=1e-5, random_s
     nn_loss_history = []
     phys_loss_history = []
     total_loss_history = []
+
     
 
     print("Starting training...")
@@ -155,8 +161,8 @@ def train_pinn_basquin(data_path, num_epochs=1200, lr=0.001, lamb=1e-5, random_s
             test_loss_history.append(test_loss)
             epoch_history.append(epoch)
             nn_loss_history.append(mse_loss(params,model, X_train,y_train))
-            phys_loss_history.append(physics_loss(params,model, X_train, sigma_a_train_raw))
-            total_loss_history.append(total_loss(params,model, X_train, sigma_a_train_raw, y_train,lamb))
+            phys_loss_history.append(physics_loss(params,model, X_train, sigma_a_train_raw,y_std))
+            total_loss_history.append(total_loss(params,model, X_train, sigma_a_train_raw, y_train,lamb,y_std))
 
             y_pred_test = np.array(model.apply(params, X_test))
             y_pred_test = np.array(y_pred_test)

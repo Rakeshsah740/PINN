@@ -54,19 +54,19 @@ def mse_loss(params, model, x, y):
     return jnp.mean((logN_pred - y[:,0]) ** 2)
 
   
-def physics_loss(params, model, x, sigma_a_raw):
+def physics_loss(params, model, x, sigma_a_raw,sigma_a_std):
     logN, sigma_infinity, N0, K, m = model.apply(params, x)
     N = 10**logN
     ratio = K/(N + N0)**m
     phy_calc = sigma_infinity + ratio
-    residual = sigma_a_raw - phy_calc
+    residual = (sigma_a_raw - phy_calc)/sigma_a_std
     return jnp.mean(residual**2)
 
     
 
-def total_loss(params, model, x, sigma_a_raw, y, lambda_phys):
+def total_loss(params, model, x, sigma_a_raw, y, lambda_phys,sigma_a_std):
     mse = mse_loss(params, model, x, y)
-    phys = physics_loss(params, model, x,sigma_a_raw)
+    phys = physics_loss(params, model, x,sigma_a_raw,sigma_a_std)
     return   mse +  lambda_phys * phys
 
 
@@ -109,11 +109,17 @@ def train_pinn_sendeckyj(data_path, num_epochs=650, lr=0.001, lamb=1e-4, random_
     sigma_a_train_raw = jnp.array(X_train_np[:, [sigma_a_idx]])
     sigma_a_test_raw = jnp.array(X_test_np[:, [sigma_a_idx]])
 
+    # Use later for the normalization
+    sigma_a_std = float(np.std(X_train_np[:, sigma_a_idx]))
+
+
+
+
 
     @jax.jit
     def train_step(params, opt_state, x, sigma_a_raw, y):
         loss, grads = jax.value_and_grad(
-            lambda p: total_loss(p, model, x, sigma_a_raw, y, lamb)
+            lambda p: total_loss(p, model, x, sigma_a_raw, y, lamb,sigma_a_std)
         )(params)
         updates, opt_state = optimizer.update(grads, opt_state)
         params = optax.apply_updates(params, updates)
@@ -131,7 +137,7 @@ def train_pinn_sendeckyj(data_path, num_epochs=650, lr=0.001, lamb=1e-4, random_
         
     # Initialize model and parameters                                            
     model = PhysicsInformedNN()
-    optimizer = optax.adam(learning_rate=0.001)
+    optimizer = optax.adam(learning_rate=lr)
 
 
     # Initialize parameters 
@@ -148,9 +154,9 @@ def train_pinn_sendeckyj(data_path, num_epochs=650, lr=0.001, lamb=1e-4, random_
             test_loss = mse_loss(params, model, X_test, y_test)
             train_loss_history.append(train_loss)
             test_loss_history.append(test_loss)
-            phys_loss_value = physics_loss(params,model, X_train, sigma_a_train_raw)
+            phys_loss_value = physics_loss(params,model, X_train, sigma_a_train_raw,sigma_a_std)
             nn_loss_value = mse_loss(params,model, X_train, y_train)
-            total_loss_value = total_loss(params,model, X_train, sigma_a_train_raw, y_train, lamb)
+            total_loss_value = total_loss(params,model, X_train, sigma_a_train_raw, y_train, lamb,sigma_a_std)
             nn_loss_history.append(nn_loss_value)
             phys_loss_history.append(phys_loss_value)
             total_loss_history.append(total_loss_value)
@@ -205,7 +211,7 @@ if __name__ == "__main__":
         data_path="V4.xlsx",
         num_epochs=650,
         lr=0.001,
-        lamb=1e-4
+        lamb=0.1
     )
 
     # PLOT PERFORMANCE

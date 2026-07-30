@@ -46,38 +46,40 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
+    data_path="V4.xlsx"
+
     print("Basquin Model")
     trained_params_bq, model_bq, scaler_bq, metrics_bq, history_bq = train_pinn_basquin(
-        data_path="V4.xlsx",
+        data_path=data_path,
         num_epochs=1000,
         lr=0.001,
-        lamb=1e-3
+        lamb=1e-1
     )
 
     
     print("Stromeyer Model")
     trained_params_sm, model_sm, scaler_sm, metrics_sm, history_sm = train_pinn_stromeyer(
-        data_path="V4.xlsx",
+        data_path=data_path,
         num_epochs=1200,
         lr=0.001,
-        lamb=0.01
+        lamb=0.1
     )
 
     
     print("Kohout-Vechet Model")
     trained_params_kv, model_kv, scaler_kv, metrics_kv, history_kv = train_pinn_kv(
-        data_path="V4.xlsx",
+        data_path=data_path,
         num_epochs=650,
         lr=0.001,
-        lamb=1e-4
+        lamb=0.1
     )
 
     print("Sendeckyj Model")
     trained_params_sd, model_sd, scaler_sd, metrics_sd, history_sd = train_pinn_sendeckyj(
-        data_path="V4.xlsx",
+        data_path=data_path,
         num_epochs=650,
         lr=0.001,
-        lamb=1e-4
+        lamb=1e-1
     )
 
 

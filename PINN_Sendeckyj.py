@@ -40,12 +40,32 @@ class PhysicsInformedNN(nn.Module):
         logN = nn_pred[:,0]
 
         # Adding constrained to the output
-        sigma_infinity = nn.softplus(nn_pred[:,1])   # since it is always positive
-        N0 = nn.softplus(nn_pred[:,2])
-        K = nn.softplus(nn_pred[:,3])
-        m = nn.sigmoid(nn_pred[:,4])
+        sigma_infinity = 50.0 + 150.0 * nn.softplus(nn_pred[:,1])   # Floor of 50 MPa and growly upto infinity
+        N0 = 0.1 + 99.9 * nn.softplus(nn_pred[:,2])                 # Floor of 0.1 and growly upto infinity
+        K = 200.0 + 1000.0 * nn.softplus(nn_pred[:,3])              # Floor of 200 MPa and growly upto infinity
+        m = 0.01 + 0.29 *nn.sigmoid(nn_pred[:,4])                  # Floor of 0.01, range up to 0.3
 
         return logN, sigma_infinity, N0, K, m
+
+class EnduranceNeuralNetwork(nn.Module):
+    @nn.compact
+    def __call__(self, x):
+        x = nn.Dense(features=64)(x)
+        x = nn.relu(x)
+        x = nn.Dense(features=64)(x)
+        x = nn.relu(x)
+        x = nn.Dense(features=32)(x)
+        x = nn.relu(x)
+        nn_out = nn.Dense(features=2)(x)
+        return nn_out
+      
+
+def compute_sigma_endurance(x, model_endurance, params_endurance, scaler_X_endurance,scaler_y_endurance):
+    x_endurance = jnp.delete(x, jnp.array([15]), axis=1)
+    x_endurance_scaled = scaler_X_endurance.transform(x_endurance)
+    x_endurance_pred = model_endurance.apply(params_endurance, jnp.array(x_endurance_scaled))
+    x_endurance_pred_unscaled = scaler_y_endurance.inverse_transform(np.array(x_endurance_pred))
+    return x_endurance_pred_unscaled[:, 1].reshape(-1, 1)
     
 
 
@@ -57,7 +77,8 @@ def mse_loss(params, model, x, y):
 def physics_loss(params, model, x, sigma_a_raw,sigma_a_std):
     logN, sigma_infinity, N0, K, m = model.apply(params, x)
     N = 10**logN
-    ratio = K/(N + N0)**m
+    log10_N_plus_N0 = jnp.log10(N + N0)
+    ratio = K * (10.0 ** (-m * log10_N_plus_N0))
     phy_calc = sigma_infinity + ratio
     residual = (sigma_a_raw - phy_calc)/sigma_a_std
     return jnp.mean(residual**2)
@@ -134,6 +155,7 @@ def train_pinn_sendeckyj(data_path, num_epochs=650, lr=0.001, lamb=1e-4, random_
     epoch_history = []
     train_loss_history = []
     test_loss_history = []
+ 
         
     # Initialize model and parameters                                            
     model = PhysicsInformedNN()
@@ -168,7 +190,7 @@ def train_pinn_sendeckyj(data_path, num_epochs=650, lr=0.001, lamb=1e-4, random_
             current_r2 = r2_score(y_test_np, y_pred_test)
             current_mae = mean_absolute_error(y_test_np, y_pred_test)
             r2_history.append(current_r2)
-            
+            mae_scores.append(current_mae)
 
             pbar.set_postfix({
                 "R^2": f"{r2_history[-1]:.6f}",
@@ -177,7 +199,7 @@ def train_pinn_sendeckyj(data_path, num_epochs=650, lr=0.001, lamb=1e-4, random_
                 "Total_Loss": f"{total_loss_history[-1]:.6f}"})
 
     # Evaluate performance on test set after training completes
-    y_pred, _, _, _, _ = model.apply(params, X_test)
+    y_pred, sigma_infinity, N0, K, m = model.apply(params, X_test)
     y_pred = np.array(y_pred)
     final_r2 = r2_score(y_test_np, y_pred)
     final_mae = mean_absolute_error(y_test_np, y_pred)
@@ -187,6 +209,12 @@ def train_pinn_sendeckyj(data_path, num_epochs=650, lr=0.001, lamb=1e-4, random_
     print(f"{'='*50}")
     print(f"R² Score: {final_r2:.4f}")
     print(f"MAE: {final_mae:.4f}")
+
+    print(f"Learned Parameters:")
+    print(f"sigma_infinity min: {np.min(np.array(sigma_infinity)):.4f}, max: {np.max(np.array(sigma_infinity)):.4f}")
+    print(f"N0 min: {np.min(np.array(N0)):.4f}, max: {np.max(np.array(N0)):.4f}")
+    print(f"K min: {np.min(np.array(K)):.4f}, max: {np.max(np.array(K)):.4f}")
+    print(f"m min: {np.min(np.array(m)):.4f}, max: {np.max(np.array(m)):.4f}")
 
     # Pack histories into a clean dictionary
     history = {
@@ -204,12 +232,11 @@ def train_pinn_sendeckyj(data_path, num_epochs=650, lr=0.001, lamb=1e-4, random_
 
     return params, model, scaler, metrics, history
 
-
 if __name__ == "__main__":
     # Call your pipeline function with custom parameters
     trained_params, model, scaler, metrics, history = train_pinn_sendeckyj(
-        data_path="V4.xlsx",
-        num_epochs=650,
+        data_path="V4_including_synt.xlsx",
+        num_epochs=550,
         lr=0.001,
         lamb=0.1
     )
@@ -249,15 +276,117 @@ if __name__ == "__main__":
     plt.legend()
 
 
+ 
 
     
     # 5. PREDICTING FOR A SPECIFIC ALLOY (SYNTHETIC S-N CURVE)
     # ============================================================
+    with open("endurance_pinn_model.pkl", 'rb') as f:
+        assets = pickle.load(f)
+
+    params_endurance = assets['model_params']
+    scaler_X_endurance = assets['scaler_X']
+    scaler_y_endurance = assets['scaler_y']
+    model_endurance = EnduranceNeuralNetwork()
+
+    # Z=1
+    alloy1 = jnp.array([[
+            92.1128, 7.300, 0.1040, 0.0082, 0.0166, 0.3300, # Elements (Al to Mg) ; Z = 1,
+            0.0016, 0.0025, 0.0053, 0.0005, 0.0005, 0.1180, # Elements (Cr to Ti)
+            0, 1, 0                                        # T5=0, T6=1, T7=0
+            ,0
+        ]])
+        
+    
+    predicted_endurance1 = compute_sigma_endurance(alloy1,model_endurance, params_endurance, scaler_X_endurance,scaler_y_endurance)
+    print(f"Predicted sigma_endurance for the (z=1): {predicted_endurance1[0][0]:.4f}")
+        
+
+    # Define your target stress range 
+    stress_range1 = np.linspace(predicted_endurance1[0][0], 290, 20)
+
+    alloy_data1 = []
+    for sigma in stress_range1:
+        row = [
+            92.1128, 7.300, 0.1040, 0.0082, 0.0166, 0.3300, # Elements (Al to Mg) ; Z = 1,
+            0.0016, 0.0025, 0.0053, 0.0005, 0.0005, 0.1180, # Elements (Cr to Ti)
+            0, 1, 0,                                        # T5=0, T6=1, T7=0
+            sigma                                            # The changing stress level
+        ]
+        alloy_data1.append(row)
+
+
+    # Actual test points for the alloy (for comparison)
+    # Data
+    sigma_a_stress1 = np.array([274.3, 275.9, 261.8,
+    279.6, 214.5, 237.1, 270.6, 258.4,
+    259.4, 226.6, 221.1, 192.0, 206.4, 98.9,
+    115.3,  91.8, 72.9,
+    72.9, 85.0, 67.6, 67.6, 72.9,
+    62.6, 78.6, 67.6, 67.6, 58.0,
+    62.6
+
+    ])
+
+
+    N_stress1 = np.array([
+    15, 35, 179, 
+    258, 278, 284, 519, 788, 
+    1370, 1487, 6257, 8658, 15610,
+    216183,
+    384791,  896141, 1139222,
+    1528914, 1925880, 2744484, 3509964, 3903503,
+    4415340, 8384682, 10000084, 10000089, 10000103,
+    10000106
+    ])
+
+    # Convert to a NumPy array for preprocessing
+    alloy_data_np1 = np.array(alloy_data1)
+
+    # 1. Scale the data using the exact same scaler from training
+    alloy_data_scaled1 = scaler.transform(alloy_data_np1)
+
+
+    # 3. Convert to JAX arrays
+    X_alloy_jax1 = jnp.array(alloy_data_scaled1)
+
+    # 4. Generate predictions (Outputs will be in log10(N))
+    log10_N_pred1, _, _, _, _= model.apply(trained_params, X_alloy_jax1)
+
+    # 5. Convert back to raw physical cycles: N = 10^(log10(N))
+    N_pred_physical1 = 10 ** np.array(log10_N_pred1)
+
+    # ============================================================
+    # 6 PLOT THE GENERATED S-N CURVE
+    # ============================================================
+    plt.figure(figsize=(8, 6))
+    plt.plot(N_pred_physical1, stress_range1, color='crimson', linewidth=2.5, label='PINN Predicted S-N Curve')
+    plt.hlines(y=predicted_endurance1[0][0], xmin=N_pred_physical1.max(), xmax=3e7, color='blue', linestyle='--', label=f'Predicted Endurance Limit: {predicted_endurance1[0][0]:.2f} MPa')
+    plt.scatter(N_stress1, sigma_a_stress1, color='teal', s=60, alpha=0.7, label='Experimental Data Points')
+    plt.xscale('log') # S-N curves are traditionally viewed on a log scale for cycles
+    plt.xlabel('Cycles to Failure (N)', fontsize=12)
+    plt.ylabel('Stress Amplitude (MPa)', fontsize=12)
+    plt.title('Interpolation - Predicted Fatigue Life for Z = 1', fontsize=14, fontweight='bold')
+    plt.grid(True, which="both", linestyle=':', alpha=0.6)
+    plt.legend(fontsize=11)
+    
 
 
     # Z=4
+    alloy4 = jnp.array([[
+            92.3155, 7.0300, 0.1200, 0.0031, 0.0432, 0.3480, # Elements (Al to Mg) ; Z = 4,
+            0.0009, 0.0024, 0.0082, 0.0007, 0.0005, 0.1280, # Elements (Cr to Ti)
+            0, 1, 0                                        # T5=0, T6=1, T7=0
+            ,0
+        ]])
+        
+    
+    predicted_endurance4 = compute_sigma_endurance(alloy4,model_endurance, params_endurance, scaler_X_endurance,scaler_y_endurance)
+    print(f"Predicted sigma_endurance for the (z=4): {predicted_endurance4[0][0]:.4f}")
+        
 
-    stress_range4 = np.linspace(70, 250, 10)
+    # Define your target stress range (e.g., from 40 MPa to 250 MPa)
+    stress_range4 = np.linspace(predicted_endurance4[0][0], 306, 20)
 
     alloy_data4 = []
     for sigma in stress_range4:
@@ -265,20 +394,23 @@ if __name__ == "__main__":
             92.3155, 7.0300, 0.1200, 0.0031, 0.0432, 0.3480, # Elements (Al to Mg) ; Z = 4,
             0.0009, 0.0024, 0.0082, 0.0007, 0.0005, 0.1280, # Elements (Cr to Ti)
             0, 1, 0,                                        # T5=0, T6=1, T7=0
-            sigma                                        # The changing stress level
+            sigma                                            # The changing stress level
         ]
         alloy_data4.append(row)
 
 
     # Actual test points for the alloy (for comparison)
     # Data
-    sigma_a_stress4 = np.array([238.9, 144.7, 191, 
-                        168.7, 156.1, 133.8, 98.4, 91.3, 114.7, 106.2, 
-                        84.2, 72.2, 72.2, 78.2, 78.2, 123.9, 78.2, 78.2])
+    sigma_a_stress4 = np.array([311.3, 297.0, 296.3, 291.5, 273.7, 283.1, 
+        300.3, 285.8, 264.7, 215.8,
+        238.9, 144.7, 191, 
+        168.7, 156.1, 133.8, 98.4, 91.3, 114.7, 106.2, 
+        84.2, 72.2, 72.2, 78.2, 78.2, 123.9, 78.2, 78.2])
 
 
     N_stress4 = np.array([
-        14009, 14823, 27433, 66863, 91377, 230870, 
+        18, 83, 174, 339, 412, 421, 474, 1279, 4546, 
+        21202,14009, 14823, 27433, 66863, 91377, 230870, 
         355297, 372672, 422572, 427476, 719897, 2027306, 3126784, 1975940, 1818832, 3152047, 
         10000000, 10000000
     ])
@@ -289,14 +421,12 @@ if __name__ == "__main__":
     # 1. Scale the data using the exact same scaler from training
     alloy_data_scaled4 = scaler.transform(alloy_data_np4)
 
+
     # 3. Convert to JAX arrays
     X_alloy_jax4 = jnp.array(alloy_data_scaled4)
 
-
     # 4. Generate predictions (Outputs will be in log10(N))
     log10_N_pred4, _, _, _, _ = model.apply(trained_params, X_alloy_jax4)
-
-    
 
     # 5. Convert back to raw physical cycles: N = 10^(log10(N))
     N_pred_physical4 = 10 ** np.array(log10_N_pred4)
@@ -306,7 +436,7 @@ if __name__ == "__main__":
     # ============================================================
     plt.figure(figsize=(8, 6))
     plt.plot(N_pred_physical4, stress_range4, color='crimson', linewidth=2.5, label='PINN Predicted S-N Curve')
-    #plt.hlines(y=predicted_endurance4[0][1], xmin=N_pred_physical4.max(), xmax=3e7, color='blue', linestyle='--', label=f'Predicted Endurance Limit: {predicted_endurance4[0][1]:.2f} MPa')
+    plt.hlines(y=predicted_endurance4[0][0], xmin=N_pred_physical4.max(), xmax=3e7, color='blue', linestyle='--', label=f'Predicted Endurance Limit: {predicted_endurance4[0][0]:.2f} MPa')
     plt.scatter(N_stress4, sigma_a_stress4, color='teal', s=60, alpha=0.7, label='Experimental Data Points')
     plt.xscale('log') # S-N curves are traditionally viewed on a log scale for cycles
     plt.xlabel('Cycles to Failure (N)', fontsize=12)
@@ -314,78 +444,7 @@ if __name__ == "__main__":
     plt.title('Predicted Fatigue Life for Z = 4', fontsize=14, fontweight='bold')
     plt.grid(True, which="both", linestyle=':', alpha=0.6)
     plt.legend(fontsize=11)
-    
 
 
-    # Z = 8
-
-
-    # Define your target stress range
-    stress_range = np.linspace(60, 130, 10)
-
-    alloy_data = []
-    for sigma in stress_range:
-        row = [
-            88.0132, 10.80, 0.1850, 0.0131, 0.6140, 0.3080, # Elements (Al to Mg) ; Z = 4,
-            0.0011, 0.0018, 0.0067, 0.0012, 0.0005, 0.0554, # Elements (Cr to Ti)
-            1, 0, 0,                                       # T5=0, T6=1, T7=0
-            sigma                                      # The changing stress level
-        ]
-        alloy_data.append(row)
-
-
-    # Actual test points for the alloy (for comparison)
-    # Data
-    sigma_a_stress = np.array([
-        100.0, 100.0, 70.0, 100.0, 80.0,
-        90.0, 90.0, 120.0, 90.0, 120.0,
-        120.0, 80.0, 70.0, 80.0,
-        100.0, 90.0
-    ])
-
-
-    N_stress = np.array([
-        121476, 50161, 2710250, 471938, 10000000,
-        10000000, 130237, 61654, 171024, 706714,
-        22026, 729292, 10000000, 10000000, 
-        116454, 262829
-    ])
-        
-        
-
-    # Convert to a NumPy array for preprocessing
-    alloy_data_np = np.array(alloy_data)
-
-    # 1. Scale the data using the exact same scaler from training
-    alloy_data_scaled = scaler.transform(alloy_data_np)
-
-
-    # 3. Convert to JAX arrays
-    X_alloy_jax = jnp.array(alloy_data_scaled)
-
-
-
-
-    # 4. Generate predictions (Outputs will be in log10(N))
-    log10_N_pred, _, _, _, _ = model.apply(trained_params, X_alloy_jax)
-
-
-    # 5. Convert back to raw physical cycles: N = 10^(log10(N))
-    N_pred_physical = 10 ** np.array(log10_N_pred)
-
-    # ============================================================
-    # 6 PLOT THE GENERATED S-N CURVE
-    # ============================================================
-    plt.figure(figsize=(8, 6))
-    plt.plot(N_pred_physical, stress_range, color='crimson', linewidth=2.5, label='PINN Predicted S-N Curve')
-    #plt.hlines(y=predicted_endurance[0][1], xmin=N_pred_physical.max(), xmax=3e7, color='blue', linestyle='--', label=f'Predicted Endurance Limit: {predicted_endurance[0][1]:.2f} MPa')
-    plt.scatter(N_stress, sigma_a_stress, color='teal', s=60, alpha=0.7, label='Experimental Data Points')
-    plt.xscale('log') # S-N curves are traditionally viewed on a log scale for cycles
-    plt.xlabel('Cycles to Failure (N)', fontsize=12)
-    plt.ylabel('Stress Amplitude (MPa)', fontsize=12)
-    plt.title('Predicted Fatigue Life for Z = 8', fontsize=14, fontweight='bold')
-    plt.grid(True, which="both", linestyle=':', alpha=0.6)
-    plt.legend(fontsize=11)
-    
 
     plt.show()

@@ -15,8 +15,11 @@ import jax.numpy as jnp
 from flax import linen as nn
 import optax
 
+import torch
 from tqdm import tqdm
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Device: {device}")
 # ============================================================
 # 1. DATA LOADING & PREPARATION
 # ============================================================
@@ -71,10 +74,19 @@ class PhysicsInformedNN(nn.Module):
         nn_pred = nn.Dense(features=1)(nn_out)
         
 
-        log10_sigma_f = self.param('log10_sigma_f', lambda key: jnp.array([3.0]))
-        # Initialize b (fatigue exponent is usually negative, e.g., -0.1)
-        raw_b = self.param('raw_b', lambda key: jnp.array([-0.1]))
+        # --- Physics-Parameter Branch (predicts alloy-specific Stromeyer constants) ---
+        phys = nn.Dense(features=32)(x)
+        phys = nn.relu(phys)
+        phys = nn.Dense(features=32)(phys)
+        phys = nn.relu(phys)
+        phys = nn.Dense(features=16)(phys)
+        phys = nn.relu(phys)
+
+        log10_sigma_f = nn.Dense(features=1)(phys) + 3.0   # bias near typical starting value
+        raw_b = nn.Dense(features=1)(phys)
         b = -jax.nn.softplus(raw_b) - 0.02   # always negative, never near 0
+
+
         return nn_pred, log10_sigma_f, b
     
 class EnduranceNeuralNetwork(nn.Module):
@@ -101,17 +113,14 @@ def mse_loss(params, model, x, y):
     predictions,_,_ = model.apply(params, x)
     return jnp.mean((predictions.reshape(-1, 1) - y.reshape(-1, 1)) ** 2)
 
-def physics_loss(params, model, x, sigma_endurance_pred, sigma_a_raw,y_std):
-    nn_pred, log10_sigma_f, b= model.apply(params, x)
-     
+def physics_loss(params, model, x, sigma_endurance_pred, sigma_a_raw, y_std):
+    nn_pred, log10_sigma_f, b = model.apply(params, x)
 
     delta_sigma = jnp.maximum(sigma_a_raw - sigma_endurance_pred, 1e-8)
     stromeyer_pred = ((jnp.log10(delta_sigma) - log10_sigma_f) / b - jnp.log10(2.0))
 
-    residual = (nn_pred - stromeyer_pred)/y_std
-   
+    residual = (nn_pred - stromeyer_pred) / y_std
     return jnp.mean(residual**2)
-
 
 """ 
 def physics_loss(params,x, sigma_endurance_pred, sigma_a_raw,runout_flag):
@@ -172,9 +181,10 @@ def train_step(params, opt_state, x, sigma_a_raw, y, lamb,sigma_endurance_pred):
 lambda_values = [
     1e-2,
     1e-1,
-    0.2,
-    0.3,
-    0.5
+    0.5,
+    1.0,
+    2,
+    3
 ]
 
 pbar = tqdm(lambda_values, desc="Lambda Tuning Sweep")
@@ -217,14 +227,7 @@ for lamb in pbar:
         phys_loss_history.append(phys_loss_value)
         total_loss_history.append(total_loss_value)
 
-        log10_sigma_f_history.append(float(params['params']['log10_sigma_f'][0]))
-        b_history.append(float(params['params']['raw_b'][0]))
     
-    
-    print("log10_sigma_f range:", min(log10_sigma_f_history), max(log10_sigma_f_history))
-    print("=> sigma_f' range (real units):", 10**min(log10_sigma_f_history), "to", 10**max(log10_sigma_f_history))
-
-
 
     """
     training_history.append({

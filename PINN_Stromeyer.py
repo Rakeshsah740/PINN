@@ -36,10 +36,18 @@ class PhysicsInformedNN(nn.Module):
         nn_pred = nn.Dense(features=1)(nn_out)
         
 
-        log10_sigma_f = self.param('log10_sigma_f', lambda key: jnp.array([3.0]))
-        # Initialize b (fatigue exponent is usually negative, e.g., -0.1)
-        raw_b = self.param('raw_b', lambda key: jnp.array([-0.1]))
+        # --- Physics-Parameter Branch (predicts alloy-specific Stromeyer constants) ---
+        phys = nn.Dense(features=32)(x)
+        phys = nn.relu(phys)
+        phys = nn.Dense(features=32)(phys)
+        phys = nn.relu(phys)
+        phys = nn.Dense(features=16)(phys)
+        phys = nn.relu(phys)
+
+        log10_sigma_f = nn.Dense(features=1)(phys) + 3.0   # bias near typical starting value
+        raw_b = nn.Dense(features=1)(phys)
         b = -jax.nn.softplus(raw_b) - 0.02   # always negative, never near 0
+
 
         return nn_pred, log10_sigma_f, b
     
@@ -67,15 +75,13 @@ def mse_loss(params, model, x, y):
     predictions,_,_ = model.apply(params, x)
     return jnp.mean((predictions.reshape(-1, 1) - y.reshape(-1, 1)) ** 2)
 
-def physics_loss(params, model, x, sigma_endurance_pred, sigma_a_raw,y_std):
-    nn_pred, log10_sigma_f, b= model.apply(params, x)
-     
+def physics_loss(params, model, x, sigma_endurance_pred, sigma_a_raw, y_std):
+    nn_pred, log10_sigma_f, b = model.apply(params, x)
 
     delta_sigma = jnp.maximum(sigma_a_raw - sigma_endurance_pred, 1e-8)
     stromeyer_pred = ((jnp.log10(delta_sigma) - log10_sigma_f) / b - jnp.log10(2.0))
 
     residual = (nn_pred - stromeyer_pred)/y_std
-   
     return jnp.mean(residual**2)
 
 
@@ -200,11 +206,19 @@ def train_pinn_stromeyer(data_path, num_epochs=900, lr=0.001, lamb=1e-5, random_
             current_r2 = r2_score(y_test_np, y_pred_test)
             current_mae = mean_absolute_error(y_test_np, y_pred_test)
             r2_history.append(current_r2)
-            
+            mae_scores.append(current_mae)
 
-            log10_sigma_f_history.append(float(params['params']['log10_sigma_f'][0]))
-            b_val = float(-jax.nn.softplus(params['params']['raw_b'][0]) - 0.02)
-            b_history.append(b_val)
+            _, log10_sigma_f_pred, b_pred = model.apply(params, X_train)
+            log10_sigma_f_history.append({
+                "mean": float(jnp.mean(log10_sigma_f_pred)),
+                "std": float(jnp.std(log10_sigma_f_pred))
+            })
+
+            b_history.append({
+                "mean": float(jnp.mean(b_pred)),
+                "std": float(jnp.std(b_pred))
+            })
+
             pbar.set_postfix({
                 "R^2": f"{r2_history[-1]:.6f}",
                 "NN_Loss": f"{nn_loss_history[-1]:.6f}",
@@ -248,10 +262,10 @@ def train_pinn_stromeyer(data_path, num_epochs=900, lr=0.001, lamb=1e-5, random_
 if __name__ == "__main__":
     # Call your pipeline function with custom parameters
     trained_params, model, scaler, metrics, history = train_pinn_stromeyer(
-        data_path="V4_without_z1.xlsx",
-        num_epochs=900,
+        data_path="V4_including_synt_without_z1.xlsx",
+        num_epochs=3000,
         lr=0.001,
-        lamb=0.1
+        lamb=1.1
     )
 
     # PLOT PERFORMANCE
@@ -288,19 +302,21 @@ if __name__ == "__main__":
     plt.title('Training loss vs Test loss', fontsize=14, fontweight='bold')
     plt.legend()
 
+    """
+
     plt.figure(figsize=(10, 5))
     plt.plot(history['epoch'], history['b'], color='orange', linestyle='--', linewidth=2)
     plt.title('b', fontsize=14, fontweight='bold')
     plt.legend()
 
     
-    """
+    
     plt.figure(figsize=(10, 5))
     plt.plot(history['epoch'], history['log10_sigma_f_history'], label='sigma_f', color='orange', linestyle='--', linewidth=2)
     plt.title('Training log10_sigma_f', fontsize=14, fontweight='bold')
     plt.legend()
 
-    """ 
+    """
 
     # 5. PREDICTING FOR A SPECIFIC ALLOY (SYNTHETIC S-N CURVE)
     # ============================================================
@@ -487,7 +503,7 @@ if __name__ == "__main__":
     stress_range6 = np.linspace(predicted_endurance6[0][0], 183, 20)
 
     alloy_data6 = []
-    for sigma in stress_range4:
+    for sigma in stress_range6:
         row = [
 	    87.9112, 10.8900, 0.1820, 0.0188, 0.6180, 0.3100,
    	    0.0016, 0.0024, 0.0098, 0.0010, 0.0005, 0.0547,
@@ -569,7 +585,7 @@ if __name__ == "__main__":
         row = [
             88.0132, 10.80, 0.1850, 0.0131, 0.6140, 0.3080, # Elements (Al to Mg) ; Z = 4,
             0.0011, 0.0018, 0.0067, 0.0012, 0.0005, 0.0554, # Elements (Cr to Ti)
-            1, 0, 0,                                       # T5=0, T6=1, T7=0
+            1, 0, 0,                                       # T5=1, T6=0, T7=0
             sigma                                          # The changing stress level
         ]
         alloy_data.append(row)

@@ -42,42 +42,45 @@ def compute_sigma_endurance(x, model_endurance, params_endurance, scaler_X_endur
     x_endurance_pred_unscaled = scaler_y_endurance.inverse_transform(np.array(x_endurance_pred))
     return x_endurance_pred_unscaled[:, 1].reshape(-1, 1)
 
+
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
+    data_path="V4_including_synt_without_z1.xlsx"
+
 
     print("Basquin Model")
     trained_params_bq, model_bq, scaler_bq, metrics_bq, history_bq = train_pinn_basquin(
-        data_path="V4.xlsx",
+        data_path=data_path,
         num_epochs=1000,
         lr=0.001,
-        lamb=1e-3
+        lamb=1
     )
 
     
     print("Stromeyer Model")
     trained_params_sm, model_sm, scaler_sm, metrics_sm, history_sm = train_pinn_stromeyer(
-        data_path="V4.xlsx",
-        num_epochs=1200,
+        data_path=data_path,
+        num_epochs=2000,
         lr=0.001,
-        lamb=0.01
+        lamb=1
     )
 
     
     print("Kohout-Vechet Model")
     trained_params_kv, model_kv, scaler_kv, metrics_kv, history_kv = train_pinn_kv(
-        data_path="V4.xlsx",
-        num_epochs=650,
+        data_path=data_path,
+        num_epochs=2000,
         lr=0.001,
-        lamb=1e-4
+        lamb=1
     )
 
     print("Sendeckyj Model")
     trained_params_sd, model_sd, scaler_sd, metrics_sd, history_sd = train_pinn_sendeckyj(
-        data_path="V4.xlsx",
-        num_epochs=650,
+        data_path=data_path,
+        num_epochs=1500,
         lr=0.001,
-        lamb=1e-4
+        lamb=1
     )
 
 
@@ -340,7 +343,7 @@ for alloy in alloys_data:
     plt.legend()
     plt.tight_layout()
 
-
+    
     # 6. Figure 1: S-N Curve for the current alloy
     plt.figure(figsize=(8, 6))
 
@@ -348,7 +351,35 @@ for alloy in alloys_data:
         # Generate predictions dynamically based on return signature
         res = m["model"].apply(m["params"], X_alloy_jax)
         log10_N_pred = res[0] if isinstance(res, tuple) else res
-        N_pred_physical = 10 ** np.array(log10_N_pred)
+        N_pred_physical = (10 ** np.array(log10_N_pred)).flatten()
+
+        """
+        # Factor of 2 scatter band (N/2 to 2N)
+        N_scatter_low = N_pred_physical / 2.0
+        N_scatter_high = N_pred_physical * 2.0
+
+        # Factor of 3 scatter band (N/3 to 3N)
+        N_scatter_2_low = N_pred_physical / 3.0
+        N_scatter_2_high = N_pred_physical * 3.0
+
+        # Fill factor 3 band (fainter)
+        plt.fill_betweenx(
+            stress_range,
+            N_scatter_2_low,
+            N_scatter_2_high,
+            color=m["color"],
+            alpha=0.08
+        )
+
+        # Fill factor 2 band (clearer)
+        plt.fill_betweenx(
+            stress_range,
+            N_scatter_low,
+            N_scatter_high,
+            color=m["color"],
+            alpha=0.18
+        )
+        """
 
         # Plot predicted S-N curve
         plt.plot(
@@ -358,6 +389,7 @@ for alloy in alloys_data:
             color=m["color"],
             linewidth=2.5,
         )
+    
         # Plot horizontal endurance limit line
         plt.hlines(
             y=predicted_endurance,
@@ -366,6 +398,7 @@ for alloy in alloys_data:
             color=m["color"],
             linestyle="--",
         )
+    
 
     # Scatter experimental points
     plt.scatter(

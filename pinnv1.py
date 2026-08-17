@@ -36,15 +36,20 @@ class PhysicsInformedNN(nn.Module):
         nn_out = nn.Dense(features=20)(nn_out)
         nn_out = nn.relu(nn_out)
         nn_pred = nn.Dense(features=1)(nn_out)
-        
 
-        # --- Physics Branch (Trainable Basquin Parameters) ---
-        # Initialize log10(sigma_f') around a realistic value (e.g., log10(1000) ~ 3.0)
-        log10_sigma_f = self.param('log10_sigma_f', lambda key: jnp.array([3.0]))
-        # Initialize b (fatigue exponent is usually negative, e.g., -0.1)
-        b = self.param('b', lambda key: jnp.array([-0.1]))
+        # --- Physics-Parameter Branch (predicts alloy-specific constants) ---
+        phys = nn.Dense(features=32)(x)
+        phys = nn.relu(phys)
+        phys = nn.Dense(features=32)(phys)
+        phys = nn.relu(phys)
+        phys = nn.Dense(features=16)(phys)
+        phys = nn.relu(phys)
 
-        return nn_pred
+        log10_sigma_f = nn.Dense(features=1)(phys) + 3.0   # bias near typical starting value
+        raw_b = nn.Dense(features=1)(phys)
+        b = -jax.nn.softplus(raw_b) - 0.01   # always negative, never near 0
+
+        return nn_pred, log10_sigma_f, b
 
 class EnduranceNeuralNetwork(nn.Module):
     @nn.compact
@@ -62,13 +67,11 @@ class EnduranceNeuralNetwork(nn.Module):
 # 2. LOSS AND TRAINING STEP DEFINITIONS
 # ============================================================
 def mse_loss(params,model, x, y):
-    predictions = model.apply(params, x)
+    predictions,_,_ = model.apply(params, x)
     return jnp.mean((predictions - y) ** 2)
 
 def physics_loss(params,model,x, sigma_a_raw,y_std):
-    nn_pred = model.apply(params, x)
-    log10_sigma_f = params['params']['log10_sigma_f'][0]
-    b = params['params']['b'][0]
+    nn_pred, log10_sigma_f, b = model.apply(params, x)
     basquin_pred = (1.0 / (b + 1e-8)) * (jnp.log10(sigma_a_raw) - log10_sigma_f) - jnp.log10(2)
     residual =(nn_pred - basquin_pred)/y_std
     return jnp.mean((residual ** 2))
@@ -164,7 +167,7 @@ def train_pinn_basquin(data_path, num_epochs=1200, lr=0.001, lamb=1e-5, random_s
             phys_loss_history.append(physics_loss(params,model, X_train, sigma_a_train_raw,y_std))
             total_loss_history.append(total_loss(params,model, X_train, sigma_a_train_raw, y_train,lamb,y_std))
 
-            y_pred_test = np.array(model.apply(params, X_test))
+            y_pred_test, _, _ = model.apply(params, X_test)
             y_pred_test = np.array(y_pred_test)
             current_r2 = r2_score(y_test_np, y_pred_test)
             r2_history.append(current_r2)
@@ -172,16 +175,11 @@ def train_pinn_basquin(data_path, num_epochs=1200, lr=0.001, lamb=1e-5, random_s
 
             print(f"Epoch {epoch:3d} | Train Loss: {train_loss:.4f} | Test Loss: {test_loss:.4f} | NN Loss: {nn_loss_history[-1]:.4f} | Phys Loss: {phys_loss_history[-1]:.4f}")
 
-    # Inspect the learned physical constants
-    learned_sigma_f = 10 ** float(params['params']['log10_sigma_f'][0])
-    learned_b = float(params['params']['b'][0])
-    print(f"\nLearned Basquin Parameters -> sigma_f': {learned_sigma_f:.2f}, b: {learned_b:.4f}")
-
     # ============================================================
     # 4. MEASURE PERFORMANCE & PLOT PREDICTIONS
     # ============================================================
     # Generate predictions on test set
-    y_pred = np.array(model.apply(params, X_test))
+    y_pred, _, _ = model.apply(params, X_test)
 
     final_r2 = r2_score(y_test_np, y_pred)
     final_mae = mean_absolute_error(y_test_np, y_pred)
@@ -189,7 +187,7 @@ def train_pinn_basquin(data_path, num_epochs=1200, lr=0.001, lamb=1e-5, random_s
     print(f"\nPINN Model R² Score: {final_r2:.4f}")
     print(f"PINN Model MAE:      {final_mae:.4f}")
 
-            # Pack histories into a clean dictionary
+    # Pack histories into a clean dictionary
     history = {
         "epoch": epoch_history,
         "train_loss": train_loss_history,
@@ -210,7 +208,7 @@ if __name__ == "__main__":
         data_path="V4.xlsx",
         num_epochs=1000,
         lr=0.001,
-        lamb=1e-3
+        lamb=1
     )
     # Scatter Plot
     plt.figure(figsize=(10, 5))
@@ -243,6 +241,14 @@ if __name__ == "__main__":
     plt.plot(history['epoch'], history['test_loss'], label='Test Loss', color='orange', linestyle='--', linewidth=2)
     plt.yscale('log')  # Log scale for better visibility of loss trends
     plt.title('Training loss vs Test loss', fontsize=14, fontweight='bold')
+    plt.legend()
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(history['nn_loss'], history['phys_loss'], label='NN Loss', color='green', linestyle='-.', linewidth=3)
+    plt.title('Physics Loss vs NN Loss', fontsize=14, fontweight='bold')
+    plt.xlabel('Physics Loss', fontsize=12)     
+    plt.ylabel('NN Loss', fontsize=12)
+    plt.grid(True, linestyle=':', alpha=0.6)
     plt.legend()
 
 
@@ -364,7 +370,7 @@ if __name__ == "__main__":
     X_alloy_jax = jnp.array(alloy_data_scaled)
 
     # 4. Generate predictions (Outputs will be in log10(N))
-    log10_N_pred = model.apply(trained_params, X_alloy_jax)
+    log10_N_pred, _, _ = model.apply(trained_params, X_alloy_jax)
 
     # 5. Convert back to raw physical cycles: N = 10^(log10(N))
     N_pred_physical = 10 ** np.array(log10_N_pred)

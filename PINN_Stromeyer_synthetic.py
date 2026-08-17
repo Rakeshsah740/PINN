@@ -46,9 +46,9 @@ if __name__ == "__main__":
     print("Stromeyer Model")
     trained_params_sm, model_sm, scaler_sm, metrics_sm, history_sm = train_pinn_stromeyer(
         data_path="V4.xlsx",
-        num_epochs=1200,
+        num_epochs=650,
         lr=0.001,
-        lamb=0.01
+        lamb=1.1
     )
 
     df = pd.read_excel("excel/Synthetic_Prediction_SM_IN.xlsx")
